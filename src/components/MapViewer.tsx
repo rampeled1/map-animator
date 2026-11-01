@@ -1,0 +1,1197 @@
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import maplibregl from 'maplibre-gl';
+import { Route, MapSign, CameraBlock, StepId } from '../types';
+import { buildMapStyle } from '../utils/mapStyleBuilder';
+
+interface MapViewerProps {
+  themeId: string;
+  mapLabels?: boolean;
+  labelLang?: string;
+  regions?: boolean;
+  terrain?: boolean;
+  aspect?: '16:9' | '9:16' | '1:1' | '4:5' | '4:3' | '21:9';
+  size?: 480 | 720 | 1080 | 1440 | 2160;
+  routes: Route[];
+  currentStep?: StepId;
+  activeRouteId?: string;
+  signs?: MapSign[];
+  cameraBlock?: CameraBlock;
+  currentTime?: number;
+  duration?: number;
+  overlays?: any;
+  cameraMode?: 'follow' | 'still' | 'orbit' | 'tripod';
+  rotateOffset?: number;
+  includeMapCredit?: boolean;
+  isPlaying?: boolean;
+  fitRouteRequested?: Route | null;
+  onUpdateRoute?: (route: Route) => void;
+  onAddPoint?: (point: { lng: number; lat: number }) => void;
+}
+
+interface SearchPlace {
+  id: string;
+  name: string;
+  context: string;
+  kind: 'country' | 'region' | 'city' | 'town' | 'peak' | 'water' | 'park' | 'street' | 'place';
+  center: [number, number];
+  bounds?: [number, number, number, number];
+}
+
+const PLACE_ZOOM: Record<SearchPlace['kind'], number> = {
+  country: 5,
+  region: 7,
+  city: 11,
+  town: 13,
+  peak: 12,
+  water: 10,
+  park: 11,
+  street: 15,
+  place: 14,
+};
+
+const PLACE_ICONS: Record<SearchPlace['kind'], string> = {
+  country: 'M4 21V4h11l1 2h4v9h-7l-1-2H6v8z',
+  region: 'M3 6l6-3 6 3 6-3v15l-6 3-6-3-6 3z',
+  city: 'M3 21V9l6-4v4l6-4v16zM17 21V11h4v10z',
+  town: 'M4 21v-9l8-6 8 6v9h-6v-6h-4v6z',
+  peak: 'M2 20l7-12 4 6 3-4 6 10z',
+  water:
+    'M2 15c3 0 3-2 5-2s2 2 5 2 3-2 5-2 2 2 5 2v3c-3 0-3-2-5-2s-2 2-5 2-3-2-5-2-2 2-5 2z',
+  park: 'M12 2l6 9h-4l5 7H5l5-7H6zM11 18h2v4h-2z',
+  street: 'M9 2h2v20H9zM13 2h2v20h-2zM4 2h2v20H4zM18 2h2v20h-2z',
+  place:
+    'M12 2a7 7 0 0 1 7 7c0 5-7 13-7 13S5 14 5 9a7 7 0 0 1 7-7zm0 4.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z',
+};
+
+function classifyPlaceKind(props: any): SearchPlace['kind'] {
+  const val = props.osm_value ?? '';
+  if (props.type === 'country' || val === 'country') return 'country';
+  if (
+    props.type === 'state' ||
+    val === 'state' ||
+    val === 'region' ||
+    val === 'province' ||
+    props.type === 'county'
+  )
+    return 'region';
+  if (val === 'city') return 'city';
+  if (['town', 'village', 'hamlet', 'suburb', 'neighbourhood', 'locality'].includes(val))
+    return 'town';
+  if (['peak', 'volcano', 'mountain_range', 'ridge', 'hill', 'saddle'].includes(val))
+    return 'peak';
+  if (
+    props.osm_key === 'waterway' ||
+    ['water', 'lake', 'bay', 'strait', 'sea', 'river', 'coastline'].includes(val)
+  )
+    return 'water';
+  if (
+    props.osm_key === 'leisure' ||
+    props.osm_key === 'boundary' ||
+    val === 'national_park' ||
+    val === 'nature_reserve'
+  )
+    return 'park';
+  if (props.osm_key === 'highway' || props.type === 'street') return 'street';
+  return 'place';
+}
+
+async function searchPhotonPlaces(
+  query: string,
+  center: [number, number] | null,
+  signal: AbortSignal
+): Promise<SearchPlace[]> {
+  const trimmed = query.trim();
+  if (trimmed.length < 2) return [];
+  const url = new URL('https://photon.komoot.io/api/');
+  url.searchParams.set('q', trimmed);
+  url.searchParams.set('limit', '7');
+  url.searchParams.set('lang', 'en');
+  if (center) {
+    url.searchParams.set('lon', center[0].toFixed(3));
+    url.searchParams.set('lat', center[1].toFixed(3));
+  }
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw new Error(`Search failed (${res.status})`);
+  const data = await res.json();
+  const seen = new Set<string>();
+  const results: SearchPlace[] = [];
+  for (const feat of data.features ?? []) {
+    const p = feat.properties ?? {};
+    const name =
+      p.name ?? (p.street ? [p.street, p.housenumber].filter(Boolean).join(' ') : undefined);
+    if (!name) continue;
+    const context = [p.city, p.state, p.country]
+      .filter((v, i, arr) => v && v !== name && arr.indexOf(v) === i)
+      .join(', ');
+    const key = `${name}|${context}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const ext = p.extent;
+    results.push({
+      id: `${p.osm_type ?? ''}${p.osm_id ?? name}`,
+      name,
+      context,
+      kind: classifyPlaceKind(p),
+      center: feat.geometry.coordinates,
+      bounds: ext ? [ext[0], ext[3], ext[2], ext[1]] : undefined,
+    });
+  }
+  return results;
+}
+
+function getAspectRatioDims(aspect: string, size: number): [number, number] {
+  const [aw, ah] = aspect.split(':').map(Number);
+  if (aw >= ah) {
+    return [Math.round((size * aw) / ah), size];
+  }
+  return [size, Math.round((size * ah) / aw)];
+}
+
+function computeFrameRect(viewW: number, viewH: number, aspectW: number, aspectH: number) {
+  const availW = Math.max(viewW - 40, 0);
+  const availH = Math.max(viewH - 40, 0);
+  const ratio = aspectW / aspectH;
+  let w = availW;
+  let h = w / ratio;
+  if (h > availH) {
+    h = availH;
+    w = h * ratio;
+  }
+  return {
+    x: (viewW - w) / 2,
+    y: (viewH - h) / 2,
+    width: w,
+    height: h,
+  };
+}
+
+function renderVehicleShape(type: string | undefined, color: string, scale: number) {
+  const s = Math.max(0.6, scale);
+  switch (type) {
+    case 'raft':
+      // Raft with paddlers (Oct 27 changelog)
+      return (
+        <g transform={`scale(${s})`}>
+          <rect x="-14" y="-8" width="28" height="16" rx="8" fill={color} stroke="#ffffff" strokeWidth="1.5" />
+          <line x1="-12" y1="0" x2="12" y2="0" stroke="#ffffff" strokeWidth="1" strokeDasharray="2 2" />
+          <circle cx="-8" cy="-5" r="2" fill="#ffffff" />
+          <circle cx="0" cy="-5" r="2" fill="#ffffff" />
+          <circle cx="8" cy="-5" r="2" fill="#ffffff" />
+          <circle cx="-8" cy="5" r="2" fill="#ffffff" />
+          <circle cx="0" cy="5" r="2" fill="#ffffff" />
+          <circle cx="8" cy="5" r="2" fill="#ffffff" />
+          <circle cx="-11" cy="0" r="2" fill="#ffd600" />
+        </g>
+      );
+    case 'surf':
+      // Surfer on board with wave spray (Oct 22 changelog)
+      return (
+        <g transform={`scale(${s})`}>
+          <path d="M-14 -3 Q-18 -8 -22 -6 M-14 3 Q-18 8 -22 6" stroke="#90caf9" strokeWidth="1.5" fill="none" />
+          <ellipse cx="0" cy="0" rx="14" ry="4.5" fill={color} stroke="#ffffff" strokeWidth="1.5" />
+          <circle cx="2" cy="0" r="2.8" fill="#ffffff" />
+          <line x1="-2" y1="-3" x2="6" y2="3" stroke="#ffffff" strokeWidth="1.8" strokeLinecap="round" />
+        </g>
+      );
+    case 'tank':
+      // Battle tank (Oct 21 changelog)
+      return (
+        <g transform={`scale(${s})`}>
+          <rect x="-11" y="-8" width="22" height="16" rx="2" fill="#374151" stroke="#ffffff" strokeWidth="1.2" />
+          <rect x="-8" y="-5.5" width="16" height="11" rx="2" fill={color} />
+          <line x1="0" y1="0" x2="16" y2="0" stroke="#111827" strokeWidth="3" strokeLinecap="round" />
+          <circle cx="0" cy="0" r="4" fill="#1f2937" stroke="#ffffff" strokeWidth="1" />
+        </g>
+      );
+    case 'fighter':
+      // Fighter jet (Oct 21 changelog)
+      return (
+        <g transform={`scale(${s})`}>
+          <path d="M16 0 L-4 -12 L-2 -3 L-12 -6 L-10 0 L-12 6 L-2 3 L-4 12 Z" fill={color} stroke="#ffffff" strokeWidth="1.4" strokeLinejoin="round" />
+          <polygon points="-12,0 -16,-2 -15,0 -16,2" fill="#f59e0b" />
+        </g>
+      );
+    case 'bomber':
+      // WWII bomber (Oct 21 changelog)
+      return (
+        <g transform={`scale(${s})`}>
+          <path d="M14 0 L-2 -18 L-4 -4 L-14 -8 L-12 0 L-14 8 L-4 4 L-2 18 Z" fill={color} stroke="#ffffff" strokeWidth="1.5" />
+          <circle cx="2" cy="-8" r="2" fill="#1f2937" />
+          <circle cx="2" cy="8" r="2" fill="#1f2937" />
+        </g>
+      );
+    case 'chairlift':
+    case 'cablecar':
+    case 'funicular':
+      // Chairlift / Cable car (Oct 17 & 19 changelog)
+      return (
+        <g transform={`scale(${s})`}>
+          <line x1="-12" y1="0" x2="12" y2="0" stroke="#9ca3af" strokeWidth="1.5" />
+          <rect x="-6" y="-6" width="12" height="12" rx="2.5" fill={color} stroke="#ffffff" strokeWidth="1.2" />
+          <circle cx="-2" cy="-1" r="1.5" fill="#ffffff" />
+          <circle cx="2" cy="-1" r="1.5" fill="#ffffff" />
+        </g>
+      );
+    case 'bicycle':
+    case 'mountainbike':
+      return (
+        <g transform={`scale(${s})`}>
+          <line x1="-9" y1="0" x2="9" y2="0" stroke="#111827" strokeWidth="2" />
+          <line x1="6" y1="-5" x2="6" y2="5" stroke="#ffffff" strokeWidth="2.5" strokeLinecap="round" />
+          <ellipse cx="0" cy="0" rx="3.5" ry="2.5" fill={color} stroke="#ffffff" strokeWidth="1" />
+        </g>
+      );
+    case 'walking':
+    case 'hiker':
+    case 'winterhike':
+    case 'running':
+      return (
+        <g transform={`scale(${s})`}>
+          <circle cx="4" cy="0" r="3.2" fill="#ffffff" stroke="#111827" strokeWidth="1" />
+          <rect x="-6" y="-4" width="8" height="8" rx="2" fill={color} stroke="#ffffff" strokeWidth="1.2" />
+          {type === 'winterhike' && (
+            <path d="M-8 -6 L-8 6 M4 -6 L4 6" stroke="#60a5fa" strokeWidth="1.5" strokeLinecap="round" />
+          )}
+        </g>
+      );
+    case 'boat':
+    case 'sailboat':
+    case 'catamaran':
+    case 'battleship':
+    case 'carrier':
+    case 'submarine':
+      return (
+        <g transform={`scale(${s})`}>
+          <path d="M14 0 C10 -6, -8 -6, -12 -4 L-12 4 C-8 6, 10 6, 14 0 Z" fill={color} stroke="#ffffff" strokeWidth="1.5" />
+          <circle cx="0" cy="0" r="2.5" fill="#ffffff" />
+        </g>
+      );
+    case 'plane':
+    case 'sportsplane':
+    case 'floatplane':
+    case 'sailplane':
+      return (
+        <g transform={`scale(${s})`}>
+          <path d="M15 0 L-2 -15 L-4 -4 L-12 -6 L-11 0 L-12 6 L-4 4 L-2 15 Z" fill={color} stroke="#ffffff" strokeWidth="1.4" />
+        </g>
+      );
+    default:
+      return (
+        <g transform={`scale(${s})`}>
+          <path
+            d="M 12 0 L -8 -7 L -4 0 L -8 7 Z"
+            fill={color}
+            stroke="#ffffff"
+            strokeWidth="1.8"
+            strokeLinejoin="round"
+          />
+        </g>
+      );
+  }
+}
+
+export const MapViewer: React.FC<MapViewerProps> = ({
+  themeId,
+  mapLabels = true,
+  labelLang,
+  regions = false,
+  terrain = false,
+  aspect = '16:9',
+  size = 1080,
+  routes,
+  signs,
+  currentStep = 'route',
+  currentTime,
+  duration,
+  overlays,
+  cameraMode,
+  rotateOffset = 0,
+  includeMapCredit = true,
+  isPlaying,
+  fitRouteRequested,
+  onUpdateRoute,
+  onAddPoint,
+}) => {
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<maplibregl.Map | null>(null);
+  const onAddPointRef = useRef(onAddPoint);
+  onAddPointRef.current = onAddPoint;
+  const onUpdateRouteRef = useRef(onUpdateRoute);
+  onUpdateRouteRef.current = onUpdateRoute;
+
+  const [viewSize, setViewSize] = useState({ w: 0, h: 0 });
+  const [, setRenderTick] = useState(0);
+
+  // Fit bounds when explicitly requested (Show route in Route step menu)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !fitRouteRequested || fitRouteRequested.points.length === 0) return;
+    let minLng = Infinity,
+      minLat = Infinity,
+      maxLng = -Infinity,
+      maxLat = -Infinity;
+    for (const p of fitRouteRequested.points) {
+      if (p.lng < minLng) minLng = p.lng;
+      if (p.lat < minLat) minLat = p.lat;
+      if (p.lng > maxLng) maxLng = p.lng;
+      if (p.lat > maxLat) maxLat = p.lat;
+    }
+    map.fitBounds(
+      [
+        [minLng, minLat],
+        [maxLng, maxLat],
+      ],
+      { padding: 80, maxZoom: 15, duration: 800 }
+    );
+  }, [fitRouteRequested]);
+
+  // Click handler for route waypoints to set Pause or toggle sharp corners
+  const handlePointClick = (routeId: string, ptIndex: number) => {
+    const route = routes.find((r) => r.id === routeId);
+    if (!route) return;
+    const pt = route.points[ptIndex];
+    const currentPause = pt.pauseSec || 0;
+    const input = prompt(
+      `Point #${ptIndex + 1} options:\nEnter pause duration in seconds (0 to 20), or type 'sharp' to toggle sharp corner:`,
+      currentPause > 0 ? String(currentPause) : '2'
+    );
+    if (input === null) return;
+    if (input.trim().toLowerCase() === 'sharp') {
+      const updatedPts = [...route.points];
+      updatedPts[ptIndex] = { ...pt, sharpCorner: !pt.sharpCorner };
+      if (onUpdateRouteRef.current) {
+        onUpdateRouteRef.current({ ...route, points: updatedPts });
+      }
+      return;
+    }
+    const sec = parseFloat(input);
+    if (!isNaN(sec)) {
+      const updatedPts = [...route.points];
+      updatedPts[ptIndex] = { ...pt, pauseSec: sec > 0 ? Math.min(20, Math.max(0.5, sec)) : 0 };
+      if (onUpdateRouteRef.current) {
+        onUpdateRouteRef.current({ ...route, points: updatedPts });
+      }
+    }
+  };
+
+  // Photon Place Search state
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchPlace[]>([]);
+  const [activeResultIdx, setActiveResultIdx] = useState(0);
+  const [searchStatus, setSearchStatus] = useState<'idle' | 'busy' | 'none' | 'error'>('idle');
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchBoxRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const el = workspaceRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      setViewSize({
+        w: entry.contentRect.width,
+        h: entry.contentRect.height,
+      });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Initialize MapLibre instance exactly like `i6` in mapanimator.baldinger.se
+  useEffect(() => {
+    if (!mapContainerRef.current || mapRef.current) return;
+
+    const map = new maplibregl.Map({
+      container: mapContainerRef.current,
+      maxPitch: 80,
+      style: {
+        version: 8,
+        sources: {},
+        layers: [{ id: 'bg', type: 'background', paint: { 'background-color': '#0b0c0e' } }],
+      },
+      center: [15, 50], // Default camera `us` in mapanimator.baldinger.se
+      zoom: 3.5,
+      bearing: 0,
+      pitch: 0,
+      attributionControl: { compact: true },
+      canvasContextAttributes: { preserveDrawingBuffer: true },
+    });
+
+    map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'bottom-right');
+
+    let rafId = 0;
+    const triggerSync = () => {
+      if (!rafId) {
+        rafId = requestAnimationFrame(() => {
+          rafId = 0;
+          setRenderTick((n) => n + 1);
+        });
+      }
+    };
+    map.on('move', triggerSync);
+    map.on('resize', triggerSync);
+
+    map.on('click', (e) => {
+      if (onAddPointRef.current) {
+        onAddPointRef.current({ lng: e.lngLat.lng, lat: e.lngLat.lat });
+      }
+    });
+
+    mapRef.current = map;
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      map.remove();
+      mapRef.current = null;
+    };
+  }, []);
+
+  // Dynamically build and apply the exact map style JSON whenever theme or map options change
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    let cancelled = false;
+
+    buildMapStyle({
+      mapStyle: themeId,
+      mapLabels,
+      terrain,
+      regions,
+      labelLang,
+    })
+      .then((styleJson) => {
+        if (!cancelled && mapRef.current) {
+          mapRef.current.setStyle(styleJson, { diff: false });
+        }
+      })
+      .catch((err) => console.error('Failed to build map style:', err));
+
+    return () => {
+      cancelled = true;
+    };
+  }, [themeId, mapLabels, terrain, regions, labelLang]);
+
+  // Fit map when a GPX route with many points is imported
+  const prevPointsCountRef = useRef(0);
+  useEffect(() => {
+    const map = mapRef.current;
+    const allPts = routes.flatMap((r) => r.points);
+    if (map && allPts.length > 5 && prevPointsCountRef.current <= 5) {
+      let minLng = Infinity,
+        minLat = Infinity,
+        maxLng = -Infinity,
+        maxLat = -Infinity;
+      for (const p of allPts) {
+        if (p.lng < minLng) minLng = p.lng;
+        if (p.lat < minLat) minLat = p.lat;
+        if (p.lng > maxLng) maxLng = p.lng;
+        if (p.lat > maxLat) maxLat = p.lat;
+      }
+      map.fitBounds(
+        [
+          [minLng, minLat],
+          [maxLng, maxLat],
+        ],
+        { padding: 80, maxZoom: 13, duration: 800 }
+      );
+    }
+    prevPointsCountRef.current = allPts.length;
+  }, [routes]);
+
+  // Camera tracking during animation playback (Oct 17 & 20 changelog: follow, still, tripod, orbit)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || cameraMode === 'still' || !isPlaying || !routes[0]?.points?.length) return;
+    const progress =
+      duration && duration > 0 && currentTime !== undefined
+        ? Math.min(1, Math.max(0, currentTime / duration))
+        : 1;
+    const pts = routes[0].points;
+    const idx = Math.min(pts.length - 1, Math.max(0, Math.floor(pts.length * progress)));
+    const target = pts[idx];
+    if (!target) return;
+
+    if (cameraMode === 'follow' || !cameraMode) {
+      map.easeTo({
+        center: [target.lng, target.lat],
+        bearing: rotateOffset,
+        duration: 100,
+      });
+    } else if (cameraMode === 'tripod') {
+      // Stand in one spot (the start point) and swivel to watch the symbol go by
+      const origin = pts[0];
+      const angle = (Math.atan2(target.lat - origin.lat, target.lng - origin.lng) * 180) / Math.PI;
+      map.easeTo({
+        bearing: 90 - angle,
+        duration: 100,
+      });
+    } else if (cameraMode === 'orbit') {
+      // Smoothly orbit 360 degrees around the symbol over the trip
+      const orbitBearing = progress * 360;
+      map.easeTo({
+        center: [target.lng, target.lat],
+        bearing: orbitBearing,
+        duration: 100,
+      });
+    }
+  }, [currentTime, duration, cameraMode, isPlaying, routes, rotateOffset]);
+
+  // Photon Place Search keyboard shortcut `/` and click outside
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        e.key !== '/' ||
+        e.metaKey ||
+        e.ctrlKey ||
+        target?.closest('input, textarea, select, [contenteditable="true"]')
+      )
+        return;
+      e.preventDefault();
+      setSearchOpen(true);
+      requestAnimationFrame(() => searchInputRef.current?.focus());
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (!searchBoxRef.current?.contains(e.target as Node)) {
+        setSearchOpen(false);
+      }
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [searchOpen]);
+
+  useEffect(() => {
+    if (!searchOpen || searchQuery.trim().length < 2) return;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      setSearchStatus('busy');
+      const c = mapRef.current?.getCenter();
+      searchPhotonPlaces(searchQuery, c ? [c.lng, c.lat] : null, ctrl.signal)
+        .then((res) => {
+          setSearchResults(res);
+          setActiveResultIdx(0);
+          setSearchStatus(res.length ? 'idle' : 'none');
+        })
+        .catch((err) => {
+          if (err.name !== 'AbortError') setSearchStatus('error');
+        });
+    }, 280);
+    return () => {
+      clearTimeout(timer);
+      ctrl.abort();
+    };
+  }, [searchQuery, searchOpen]);
+
+  const [resW, resH] = getAspectRatioDims(aspect, size);
+  const frame = computeFrameRect(viewSize.w, viewSize.h, resW, resH);
+  const scale = Math.min(frame.width, frame.height) / 1080 || 1;
+
+  const handleSelectPlace = (place: SearchPlace) => {
+    setSearchOpen(false);
+    setSearchQuery('');
+    setSearchResults([]);
+    const map = mapRef.current;
+    if (!map) return;
+
+    const padding = {
+      top: frame.y + 40,
+      left: frame.x + 40,
+      right: Math.max(40, viewSize.w - frame.x - frame.width + 40),
+      bottom: Math.max(40, viewSize.h - frame.y - frame.height + 40),
+    };
+    const camOpts = {
+      bearing: map.getBearing(),
+      pitch: map.getPitch(),
+      duration: 1400,
+    };
+
+    if (place.bounds && place.bounds[0] !== place.bounds[2]) {
+      const [w, s, e, n] = place.bounds;
+      map.fitBounds(
+        [
+          [w, s],
+          [e, n],
+        ],
+        { ...camOpts, padding, maxZoom: Math.max(PLACE_ZOOM[place.kind], 13) }
+      );
+    } else {
+      const offset: [number, number] = [
+        frame.x + frame.width / 2 - viewSize.w / 2,
+        frame.y + frame.height / 2 - viewSize.h / 2,
+      ];
+      map.flyTo({
+        ...camOpts,
+        center: place.center,
+        zoom: PLACE_ZOOM[place.kind],
+        offset,
+      });
+    }
+
+    const pinEl = document.createElement('div');
+    pinEl.className = 'place-pin';
+    pinEl.innerHTML = `<svg width="30" height="40" viewBox="0 0 30 40" aria-hidden="true"><ellipse cx="15" cy="38" rx="6" ry="2" fill="rgba(0,0,0,0.3)"/><path d="M15 1C7.3 1 1.5 6.8 1.5 14.2 1.5 24 15 37 15 37S28.5 24 28.5 14.2C28.5 6.8 22.7 1 15 1z" fill="#ffffff" stroke="#1b1f24" stroke-width="2"/><circle cx="15" cy="14" r="5" fill="#1b1f24"/></svg>`;
+    const marker = new maplibregl.Marker({ element: pinEl, anchor: 'bottom' })
+      .setLngLat(place.center)
+      .addTo(map);
+    setTimeout(() => pinEl.classList.add('leaving'), 4200);
+    setTimeout(() => marker.remove(), 5000);
+  };
+
+  const map = mapRef.current;
+  const hasQuery = searchQuery.trim().length >= 2;
+  const visibleResults = hasQuery ? searchResults : [];
+  const visibleStatus = hasQuery ? searchStatus : 'idle';
+
+  return (
+    <div
+      ref={workspaceRef}
+      className={`workspace${currentStep === 'route' ? ' is-drawing' : ''}`}
+      style={{ width: '100%', height: '100%' }}
+    >
+      <div ref={mapContainerRef} className="map" translate="no" />
+
+      {/* Route SVG Overlay */}
+      {viewSize.w > 0 && map && (
+        <svg
+          className="overlay notranslate"
+          width={viewSize.w}
+          height={viewSize.h}
+          aria-hidden="true"
+        >
+          {routes.map((route) => {
+            if (route.points.length === 0) return null;
+            const progress =
+              duration && duration > 0 && currentTime !== undefined
+                ? Math.min(1, Math.max(0, currentTime / duration))
+                : 1;
+
+            const visibleCount =
+              progress >= 1
+                ? route.points.length
+                : Math.max(1, Math.round(route.points.length * progress));
+            const currentPoints = route.points.slice(0, visibleCount);
+
+            const projected = currentPoints.map((pt) => {
+              const p = map.project([pt.lng, pt.lat]);
+              return [p.x, p.y] as [number, number];
+            });
+            const strokeW = Math.max(3, (route.width || 8) * scale);
+            const dashArray =
+              route.style === 'dashed'
+                ? `${strokeW * 1.8} ${strokeW * 1.9}`
+                : route.style === 'dotted'
+                ? `0.1 ${strokeW * 2}`
+                : undefined;
+            const d =
+              projected.length >= 2
+                ? projected
+                    .map((p, idx) => `${idx ? 'L' : 'M'}${p[0].toFixed(1)} ${p[1].toFixed(1)}`)
+                    .join('')
+                : '';
+
+            // Compute arrow heading at the tip of the line
+            let headAngle = 0;
+            let tipPos: [number, number] | null = null;
+            if (projected.length >= 2) {
+              const tip = projected[projected.length - 1];
+              const prev = projected[Math.max(0, projected.length - 2)];
+              headAngle = (Math.atan2(tip[1] - prev[1], tip[0] - prev[0]) * 180) / Math.PI;
+              tipPos = tip;
+            } else if (projected.length === 1) {
+              tipPos = projected[0];
+            }
+
+            return (
+              <g key={route.id}>
+                {/* Draw Route Line unless hideLine is enabled (Oct 8 changelog) */}
+                {d && !route.hideLine && (
+                  <>
+                    <path
+                      d={d}
+                      fill="none"
+                      stroke="#ffffff"
+                      strokeWidth={strokeW + 4 * scale}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeDasharray={dashArray}
+                      opacity={0.9}
+                    />
+                    <path
+                      d={d}
+                      fill="none"
+                      stroke={route.color || '#ff4d2e'}
+                      strokeWidth={strokeW}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeDasharray={dashArray}
+                    />
+                  </>
+                )}
+                {/* Start Dot */}
+                <circle
+                  cx={projected[0][0]}
+                  cy={projected[0][1]}
+                  r={Math.max(4, strokeW * 0.9)}
+                  fill="#fff"
+                  stroke={route.color || '#ff4d2e'}
+                  strokeWidth={Math.max(2, strokeW * 0.45)}
+                />
+                {/* Animated Vehicle / Symbol at Tip with SymbolScale (Oct 8, 21, 27 changelogs) */}
+                {tipPos && projected.length >= 2 && (
+                  <g transform={`translate(${tipPos[0]}, ${tipPos[1]}) rotate(${headAngle})`}>
+                    {renderVehicleShape(
+                      route.transportType,
+                      route.color || '#ff4d2e',
+                      (route.symbolScale || 1.0) * scale
+                    )}
+                  </g>
+                )}
+              </g>
+            );
+          })}
+
+          {/* Signs, Photos & Waypoints (Oct 8 & 29 changelog) */}
+          {signs &&
+            (() => {
+              const activePhotos = signs.filter((s) => s.style === 'photo' && s.photoUrl);
+              return signs.map((sign) => {
+                const p = map.project([sign.lng, sign.lat]);
+
+                // Side-by-side photo layout on leader strings (Oct 29 changelog)
+                if (sign.style === 'photo' && sign.photoUrl) {
+                  const photoIdx = activePhotos.findIndex((s) => s.id === sign.id);
+                  const totalPhotos = activePhotos.length;
+                  const offsetX =
+                    totalPhotos > 1 ? (photoIdx - (totalPhotos - 1) / 2) * 85 * scale : 0;
+                  const cardY = -65 * scale;
+
+                  return (
+                    <g key={sign.id} transform={`translate(${p.x}, ${p.y})`}>
+                      <ellipse cx={0} cy={0} rx={4 * scale} ry={2 * scale} fill="rgba(0,0,0,0.4)" />
+                      {/* Leader string from ground spot to photo card */}
+                      <path
+                        d={`M 0 0 C 0 ${-20 * scale}, ${offsetX} ${-30 * scale}, ${offsetX} ${cardY}`}
+                        stroke="#ffffff"
+                        strokeWidth="1.8"
+                        strokeDasharray="3 3"
+                        fill="none"
+                      />
+                      <circle cx={0} cy={0} r={3} fill="#ffffff" stroke="#1b1f24" strokeWidth="1" />
+                      {/* Photo card thumbnail */}
+                      <g transform={`translate(${offsetX}, ${cardY})`}>
+                        <rect
+                          x={-28 * scale}
+                          y={-28 * scale}
+                          width={56 * scale}
+                          height={56 * scale}
+                          rx={8 * scale}
+                          fill="#ffffff"
+                          stroke="#1b1f24"
+                          strokeWidth="2"
+                        />
+                        <image
+                          href={sign.photoUrl}
+                          x={-25 * scale}
+                          y={-25 * scale}
+                          width={50 * scale}
+                          height={50 * scale}
+                          preserveAspectRatio="xMidYMid slice"
+                          clipPath="inset(0 round 6px)"
+                        />
+                      </g>
+                    </g>
+                  );
+                }
+
+                // Preset Signs: Camp, Start, Finish, Hotel, Pin (Oct 8 changelog)
+                return (
+                  <g key={sign.id} transform={`translate(${p.x}, ${p.y})`}>
+                    <ellipse cx={0} cy={0} rx={5 * scale} ry={2 * scale} fill="rgba(0,0,0,0.3)" />
+
+                    {sign.style === 'camp' ? (
+                      <g transform={`scale(${scale}) translate(0, -16)`}>
+                        <circle cx={0} cy={0} r={13} fill="#10b981" stroke="#ffffff" strokeWidth="1.8" />
+                        <polygon points="0,-7 -7,5 7,5" fill="#ffffff" />
+                      </g>
+                    ) : sign.style === 'start' ? (
+                      <g transform={`scale(${scale}) translate(0, -16)`}>
+                        <circle cx={0} cy={0} r={13} fill="#3b82f6" stroke="#ffffff" strokeWidth="1.8" />
+                        <path d="M-5,6 V-6 L4,-2 L-5,2" fill="#ffffff" />
+                      </g>
+                    ) : sign.style === 'finish' ? (
+                      <g transform={`scale(${scale}) translate(0, -16)`}>
+                        <circle cx={0} cy={0} r={13} fill="#f59e0b" stroke="#ffffff" strokeWidth="1.8" />
+                        <path d="M-5,6 V-6 H3 V0 H-5" fill="#ffffff" />
+                      </g>
+                    ) : sign.style === 'hotel' ? (
+                      <g transform={`scale(${scale}) translate(0, -16)`}>
+                        <circle cx={0} cy={0} r={13} fill="#8b5cf6" stroke="#ffffff" strokeWidth="1.8" />
+                        <path d="M-6,3 H6 V6 H-6 Z M-5,-2 H-1 V3 H-5 Z" fill="#ffffff" />
+                      </g>
+                    ) : (
+                      <>
+                        <path
+                          d="M0 -22 C-6.5 -22 -11 -17 -11 -11 C-11 -3 0 0 0 0 C0 0 11 -3 11 -11 C11 -17 6.5 -22 0 -22 Z"
+                          fill="#ffffff"
+                          stroke="#1b1f24"
+                          strokeWidth="1.8"
+                        />
+                        <circle cx={0} cy={-11} r={3.8} fill="#ff4d2e" />
+                      </>
+                    )}
+
+                    {sign.text && (
+                      <text
+                        x={0}
+                        y={-28 * scale}
+                        textAnchor="middle"
+                        fill="#ffffff"
+                        fontSize={Math.max(10, 11 * scale)}
+                        fontWeight="bold"
+                        stroke="#000000"
+                        strokeWidth="3"
+                        paintOrder="stroke"
+                        className="pointer-events-none select-none font-sans"
+                      >
+                        {sign.text}
+                      </text>
+                    )}
+                  </g>
+                );
+              });
+            })()}
+        </svg>
+      )}
+
+      {/* Video Frame Overlay, HUD Dashboard, & Anchor Points */}
+      {viewSize.w > 0 && (
+        <svg className="overlay" width={viewSize.w} height={viewSize.h} aria-hidden="true">
+          <path
+            className="dim"
+            fillRule="evenodd"
+            d={`M0 0H${viewSize.w}V${viewSize.h}H0Z M${frame.x} ${frame.y}V${
+              frame.y + frame.height
+            }H${frame.x + frame.width}V${frame.y}Z`}
+          />
+          <rect
+            x={frame.x}
+            y={frame.y}
+            width={frame.width}
+            height={frame.height}
+            className="frame-outline"
+          />
+          <text className="frame-label" x={frame.x} y={frame.y - 8}>
+            {aspect} · {resW}×{resH}
+          </text>
+
+          {/* Overlays HUD: Trip Title & Subtitle */}
+          {overlays?.title && (
+            <g transform={`translate(${frame.x + 24}, ${frame.y + 36})`}>
+              <text
+                fill="#ffffff"
+                fontSize={Math.max(16, 22 * scale)}
+                fontWeight="800"
+                stroke="#000000"
+                strokeWidth="4"
+                paintOrder="stroke"
+                fontFamily="sans-serif"
+              >
+                {overlays.title}
+              </text>
+              {overlays.subtitle && (
+                <text
+                  y={22 * scale}
+                  fill="#ffffff"
+                  fontSize={Math.max(12, 14 * scale)}
+                  fontWeight="600"
+                  opacity={0.85}
+                  stroke="#000000"
+                  strokeWidth="3"
+                  paintOrder="stroke"
+                  fontFamily="sans-serif"
+                >
+                  {overlays.subtitle}
+                </text>
+              )}
+            </g>
+          )}
+
+          {/* Overlays HUD: Distance, Speed, Altitude, Climb & Descent Telemetry (Oct 18 & 21 changelog) */}
+          {(overlays?.showDistance ||
+            overlays?.showAltitude ||
+            overlays?.showSpeed ||
+            overlays?.showClimbDescent) &&
+            (() => {
+              const progressRatio =
+                duration && duration > 0 && currentTime !== undefined
+                  ? Math.min(1, Math.max(0, currentTime / duration))
+                  : 1;
+              const pts = routes[0]?.points || [];
+              const currIdx = Math.min(
+                pts.length - 1,
+                Math.max(0, Math.floor(pts.length * progressRatio))
+              );
+              const currentPt = pts[currIdx];
+              const currentEle =
+                currentPt?.ele !== undefined ? Math.round(currentPt.ele) : undefined;
+
+              let currentGain = 0;
+              let currentLoss = 0;
+              for (let i = 1; i <= currIdx; i++) {
+                const prevE = pts[i - 1].ele;
+                const curE = pts[i].ele;
+                if (prevE !== undefined && curE !== undefined) {
+                  const diff = curE - prevE;
+                  if (diff > 0) currentGain += diff;
+                  else currentLoss += Math.abs(diff);
+                }
+              }
+
+              return (
+                <g transform={`translate(${frame.x + 24}, ${frame.y + frame.height - 30})`}>
+                  <rect
+                    x="-8"
+                    y="-24"
+                    width={280 * scale}
+                    height={36 * scale}
+                    rx="6"
+                    fill="rgba(15, 20, 25, 0.8)"
+                    stroke="rgba(255, 255, 255, 0.15)"
+                  />
+                  <text
+                    y="0"
+                    fill="#ffffff"
+                    fontSize={Math.max(11, 13 * scale)}
+                    fontWeight="700"
+                    fontFamily="monospace"
+                  >
+                    {overlays.showDistance &&
+                      (routes[0]?.stats?.distanceKm
+                        ? `${(routes[0].stats.distanceKm * progressRatio).toFixed(1)} km`
+                        : '0.0 km')}
+                    {overlays.showAltitude &&
+                      (currentEle !== undefined ? ` · ${currentEle}m` : ' · -- m')}
+                    {overlays.showClimbDescent
+                      ? ` · ▲+${Math.round(currentGain)}m ▼-${Math.round(currentLoss)}m`
+                      : ''}
+                    {overlays.showSpeed &&
+                      (routes[0]?.stats?.avgSpeedKmh
+                        ? ` · ${routes[0].stats.avgSpeedKmh} km/h`
+                        : ' · -- km/h')}
+                  </text>
+                </g>
+              );
+            })()}
+
+          {/* Overlays HUD: Compass Rose */}
+          {overlays?.showCompass && map && (
+            <g transform={`translate(${frame.x + frame.width - 44}, ${frame.y + 44})`}>
+              <circle
+                cx="0"
+                cy="0"
+                r={22 * scale}
+                fill="rgba(15, 20, 25, 0.7)"
+                stroke="#ffffff"
+                strokeWidth="1.5"
+              />
+              <g transform={`rotate(${-map.getBearing()})`}>
+                <polygon points="0,-16 5,0 -5,0" fill="#ff4d2e" />
+                <polygon points="0,16 5,0 -5,0" fill="#ffffff" />
+                <circle cx="0" cy="0" r="2" fill="#000000" />
+              </g>
+            </g>
+          )}
+
+          {/* Map Credit Watermark (Oct 30 changelog: can be left out of video) */}
+          {includeMapCredit !== false && (
+            <text
+              x={frame.x + frame.width - 12}
+              y={frame.y + frame.height - 10}
+              textAnchor="end"
+              fill="rgba(255, 255, 255, 0.65)"
+              fontSize={Math.max(9, 10 * scale)}
+              fontFamily="sans-serif"
+            >
+              © OpenStreetMap contributors · MapLibre
+            </text>
+          )}
+
+          {/* Route Anchor Handles & ⏸ Pause Badges in Route step */}
+          {currentStep === 'route' &&
+            map &&
+            routes.flatMap((route) =>
+              route.points.map((pt, idx) => {
+                const p = map.project([pt.lng, pt.lat]);
+                const isPaused = pt.pauseSec && pt.pauseSec > 0;
+                return (
+                  <g
+                    key={`${route.id}-pt-${idx}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handlePointClick(route.id, idx);
+                    }}
+                    className="cursor-pointer"
+                  >
+                    <circle cx={p.x} cy={p.y} r={pt.sharpCorner ? 5.5 : 6.5} className="anchor" />
+                    {/* ⏸ Mark on paused point (Official Help Guide feature) */}
+                    {isPaused && (
+                      <g transform={`translate(${p.x + 9}, ${p.y - 9})`}>
+                        <rect x="-7" y="-7" width="14" height="14" rx="3" fill="#ff4d2e" stroke="#ffffff" strokeWidth="1" />
+                        <rect x="-4" y="-4" width="2.5" height="8" rx="0.5" fill="#ffffff" />
+                        <rect x="1.5" y="-4" width="2.5" height="8" rx="0.5" fill="#ffffff" />
+                      </g>
+                    )}
+                  </g>
+                );
+              })
+            )}
+        </svg>
+      )}
+
+      {/* Photon Place Search (`Q3` exact structure) */}
+      {viewSize.w > 0 && (
+        <div
+          ref={searchBoxRef}
+          className={`place-search float${searchOpen ? ' open' : ''}`}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          {searchOpen ? (
+            <>
+              <div className="place-field">
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                  strokeLinecap="round"
+                  aria-hidden="true"
+                >
+                  <circle cx="10.5" cy="10.5" r="6.5" />
+                  <path d="M15.5 15.5L21 21" />
+                </svg>
+                <input
+                  ref={searchInputRef}
+                  autoFocus
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      setSearchOpen(false);
+                      return;
+                    }
+                    if (visibleResults.length) {
+                      if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        setActiveResultIdx((i) => (i + 1) % visibleResults.length);
+                      } else if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        setActiveResultIdx(
+                          (i) => (i - 1 + visibleResults.length) % visibleResults.length
+                        );
+                      } else if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleSelectPlace(visibleResults[activeResultIdx]);
+                      }
+                    }
+                  }}
+                  placeholder="Search for a place"
+                  aria-label="Search for a place"
+                  role="combobox"
+                  aria-expanded={visibleResults.length > 0}
+                  aria-controls="place-results"
+                />
+                <button
+                  className="place-close"
+                  aria-label="Close search"
+                  onClick={() => setSearchOpen(false)}
+                >
+                  ×
+                </button>
+              </div>
+              {visibleResults.length > 0 && (
+                <ul id="place-results" className="place-results" role="listbox">
+                  {visibleResults.map((item, idx) => (
+                    <li
+                      key={item.id + idx}
+                      id={`place-${idx}`}
+                      role="option"
+                      aria-selected={idx === activeResultIdx}
+                    >
+                      <button
+                        onMouseEnter={() => setActiveResultIdx(idx)}
+                        onClick={() => handleSelectPlace(item)}
+                      >
+                        <svg
+                          className="place-icon"
+                          width="16"
+                          height="16"
+                          viewBox="0 0 24 24"
+                          fill="currentColor"
+                          aria-hidden="true"
+                        >
+                          <path d={PLACE_ICONS[item.kind]} />
+                        </svg>
+                        <span className="place-text">
+                          <span className="place-name">{item.name}</span>
+                          {item.context && <span className="place-context">{item.context}</span>}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {visibleStatus === 'busy' && !visibleResults.length && (
+                <p className="place-note">Searching…</p>
+              )}
+              {visibleStatus === 'none' && (
+                <p className="place-note">
+                  No places found. Try another spelling, or add the country.
+                </p>
+              )}
+              {visibleStatus === 'error' && (
+                <p className="place-note">
+                  Search isn't available right now. Check your connection and try again.
+                </p>
+              )}
+              {visibleResults.length > 0 && (
+                <p className="place-credit">Search by Photon · © OpenStreetMap contributors</p>
+              )}
+            </>
+          ) : (
+            <button
+              className="place-open"
+              title="Search for a place (/)"
+              aria-label="Search for a place"
+              onClick={() => {
+                setSearchOpen(true);
+                requestAnimationFrame(() => searchInputRef.current?.focus());
+              }}
+            >
+              <svg
+                width="17"
+                height="17"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+                aria-hidden="true"
+              >
+                <circle cx="10.5" cy="10.5" r="6.5" />
+                <path d="M15.5 15.5L21 21" />
+              </svg>
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};

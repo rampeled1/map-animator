@@ -1,0 +1,30 @@
+@import './mapanimator.css';
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0e1013;
+  --panel: #16191e;
+  --panel-2: #1d2128;
+  --border: #2a2f38;
+  --border-2: #3a414c;
+  --text: #e7e9ec;
+  --muted: #8f96a0;
+  --accent: #ff7a45;
+  --accent-ink: #1c0d05;
+  --accent-soft: #ff7a451f;
+  --good: #5fcf8a;
+  --edit: #1e88ff;
+  --dim: #090a0da3;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  overflow-x: hidden;
+}
