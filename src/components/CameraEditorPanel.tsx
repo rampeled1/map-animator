@@ -1,5 +1,6 @@
 import React from 'react';
 import { CameraBlock } from '../types';
+import { Plus, Trash2, Video } from 'lucide-react';
 
 interface CameraEditorPanelProps {
   cameraMode: 'follow' | 'still' | 'orbit' | 'tripod';
@@ -15,6 +16,8 @@ interface CameraEditorPanelProps {
   lookAhead: number;
   onSetLookAhead: (lookAhead: number) => void;
   cameraBlocks: CameraBlock[];
+  onAddCameraBlock?: (kind: CameraBlock['kind']) => void;
+  onDeleteCameraBlock?: (id: string) => void;
 }
 
 export const CameraEditorPanel: React.FC<CameraEditorPanelProps> = ({
@@ -30,6 +33,9 @@ export const CameraEditorPanel: React.FC<CameraEditorPanelProps> = ({
   onSetTilt,
   lookAhead,
   onSetLookAhead,
+  cameraBlocks,
+  onAddCameraBlock,
+  onDeleteCameraBlock,
 }) => {
   return (
     <aside className="panel w-80 h-full overflow-y-auto p-4 flex flex-col space-y-4 text-xs">
@@ -111,7 +117,8 @@ export const CameraEditorPanel: React.FC<CameraEditorPanelProps> = ({
           </div>
 
           {/* Oct 17 changelog: Rotate slider for North up */}
-          {followOrient === 'north' && onSetRotateOffset && (\n            <div className="group">
+          {followOrient === 'north' && onSetRotateOffset && (
+            <div className="group">
               <div className="flex justify-between group-title">
                 <span>Rotate map angle</span>
                 <output>{rotateOffset > 0 ? `+${rotateOffset}°` : `${rotateOffset}°`}</output>
@@ -200,6 +207,58 @@ export const CameraEditorPanel: React.FC<CameraEditorPanelProps> = ({
           <span>Tilted 3D (80°)</span>
         </div>
         <p className="hint">Tilt gives a flyover feel over 3D mountains.</p>
+      </div>
+
+      {/* Camera on the Timeline (Oct 20 changelog) */}
+      <div className="group space-y-2 pt-2 border-t border-[var(--border)]">
+        <div className="flex items-center justify-between">
+          <span className="group-title mb-0">Camera keyframes ({cameraBlocks.length})</span>
+          {onAddCameraBlock && (
+            <button
+              type="button"
+              onClick={() => onAddCameraBlock(cameraMode)}
+              className="flex items-center space-x-1 text-[var(--accent)] font-semibold text-[10px] hover:underline"
+              title="Add camera keyframe at current playhead position"
+            >
+              <Plus className="w-3 h-3" />
+              <span>Add at playhead</span>
+            </button>
+          )}
+        </div>
+        <p className="hint">
+          Move the playhead to any moment and press <b>+ Add at playhead</b> to switch camera style from there.
+        </p>
+        {cameraBlocks.length > 0 && (
+          <div className="space-y-1 max-h-40 overflow-y-auto">
+            {cameraBlocks
+              .slice()
+              .sort((a, b) => a.tRatio - b.tRatio)
+              .map((cb) => (
+                <div
+                  key={cb.id}
+                  className="flex items-center justify-between p-1.5 rounded bg-[var(--panel-2)] border border-[var(--border)] text-[10px]"
+                >
+                  <div className="flex items-center space-x-1.5">
+                    <Video className="w-3 h-3 text-[var(--accent)]" />
+                    <span className="font-semibold capitalize text-[var(--text)]">{cb.kind}</span>
+                    <span className="text-[var(--muted)]">
+                      @ {Math.round(cb.tRatio * 100)}% · {cb.pitch}° tilt · z{cb.zoom.toFixed(1)}
+                    </span>
+                  </div>
+                  {onDeleteCameraBlock && (
+                    <button
+                      type="button"
+                      onClick={() => onDeleteCameraBlock(cb.id)}
+                      className="text-[var(--muted)] hover:text-red-400 p-0.5"
+                      title="Delete camera block"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              ))}
+          </div>
+        )}
       </div>
     </aside>
   );
