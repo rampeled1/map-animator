@@ -112,7 +112,7 @@ export interface MapSign {
   style: 'pin' | 'text' | 'photo' | 'roadSign' | 'camp' | 'start' | 'finish' | 'hotel';
   text: string;
   photoUrl?: string;
-  triggerMode: 'always' | 'onPassed';
+  triggerMode: 'always' | 'onPassed' | 'whilePassing';
   pauseSec?: number; // up to 20s
   size: number;
 }

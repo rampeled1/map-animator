@@ -1,6 +1,7 @@
 import { ALL_TRANSPORTS, TRANSPORT_CATEGORIES } from './src/constants/transports.ts';
 import { ALL_MAP_THEMES } from './src/utils/mapStyleBuilder.ts';
 import { calculateTrackStats, generateDayEndSigns, haversineDistance } from './src/utils/gpxParser.ts';
+import { resampleRouteByDistance } from './src/utils/roadRouter.ts';
 import type { RoutePoint } from './src/types/index.ts';
 
 console.log('=== MAP ANIMATOR COMPREHENSIVE VERIFICATION ===\n');
@@ -98,6 +99,25 @@ assert(daySigns[1].text === 'Day 2: Valley Run' && daySigns[1].style === 'finish
 console.log('\n6. Checking Haversine Distance Calculation:');
 const dist = haversineDistance({ lng: 12.4964, lat: 41.9028 }, { lng: 12.5000, lat: 41.9050 });
 assert(dist > 0 && Math.round(dist) === 385, `Accurate geodesic distance: ${Math.round(dist)} meters`);
+
+// 7. Verify Auto-Routing Point Spacing (0.1 to 20 km)
+console.log('\n7. Checking Auto-Routing Point Spacing Resampling:');
+// Create a straight 10 km route from lat 45.0, lng 10.0 to approx 10 km north
+const route10Km = [
+  { lng: 10.0, lat: 45.0 },
+  { lng: 10.0, lat: 45.09 }, // ~10.0 km
+];
+const resampled1Km = resampleRouteByDistance(route10Km, 1.0);
+assert(resampled1Km.length >= 9 && resampled1Km.length <= 11, `Resampled every 1.0 km produces ~10 points (got ${resampled1Km.length})`);
+
+const resampled5Km = resampleRouteByDistance(route10Km, 5.0);
+assert(resampled5Km.length === 2 || resampled5Km.length === 3, `Resampled every 5.0 km produces ~2-3 points (got ${resampled5Km.length})`);
+
+const resampled01Km = resampleRouteByDistance(route10Km, 0.1);
+assert(resampled01Km.length >= 90 && resampled01Km.length <= 110, `Resampled every 0.1 km produces ~100 points (got ${resampled01Km.length})`);
+
+const resampled20Km = resampleRouteByDistance(route10Km, 20.0);
+assert(resampled20Km.length === 1, `Resampled every 20.0 km on a 10km route keeps destination point (got ${resampled20Km.length})`);
 
 console.log(`\n========================================`);
 console.log(`RESULTS: ${passedTests} / ${totalTests} tests passed successfully.`);
