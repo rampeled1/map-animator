@@ -22,7 +22,11 @@ interface EditorPageProps {
   project: MapProject;
   onUpdateProject: (updater: (prev: MapProject) => MapProject) => void;
   onBackToHome: () => void;
-  onImportGPX: (file: File, options?: { importWaypoints: boolean; createDayEndSigns: boolean }) => void;
+  onImportGPX: (
+    file: File,
+    options?: { importWaypoints: boolean; createDayEndSigns: boolean },
+    sceneIndex?: number
+  ) => void;
 }
 
 /** Exact `k6` SVG theme swatch from mapanimator.baldinger.se */
@@ -70,8 +74,10 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   const [currentStep, setCurrentStep] = useState<StepId>('route');
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  const [playbackSpeed, setPlaybackSpeed] = useState<0.5 | 1 | 2>(1);
   const [moreThemesOpen, setMoreThemesOpen] = useState(false);
   const [snapProfile, setSnapProfile] = useState<SnapProfile>('off');
+  const [routingInterval, setRoutingInterval] = useState<number | 'auto'>('auto');
   const [activeSceneIndex, setActiveSceneIndex] = useState(0);
 
   // Camera settings state
@@ -122,16 +128,23 @@ export const EditorPage: React.FC<EditorPageProps> = ({
         setIsPlaying((p) => !p);
       } else if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
         e.preventDefault();
-        setHelpOpen((h) => !h);
+        setHelpOpen((h) => {
+          if (!h) setHelpTab('shortcuts');
+          return !h;
+        });
       } else if (e.key === 'Escape') {
         setHelpOpen(false);
         setMoreThemesOpen(false);
-      } else if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+      } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         const route = activeScene.routes.find((r) => r.id === activeRouteId);
         if (route && route.points.length > 0) {
           const popped = route.points.slice(0, -1);
-          handleUpdateRoute({ ...route, points: popped });
+          handleUpdateRoute({
+            ...route,
+            points: popped,
+            stats: calculateTrackStats(popped),
+          });
         }
       }
     };
@@ -146,12 +159,16 @@ export const EditorPage: React.FC<EditorPageProps> = ({
     let frameId: number;
 
     const loop = (now: number) => {
-      const deltaSec = (now - lastTime) / 1000;
+      const deltaSec = ((now - lastTime) / 1000) * (isRendering ? 1 : playbackSpeed);
       lastTime = now;
 
       setCurrentTime((prev) => {
         const next = prev + deltaSec;
         if (next >= duration) {
+          if (isRendering && renderAllScenes && activeSceneIndex < project.scenes.length - 1) {
+            setActiveSceneIndex((idx) => idx + 1);
+            return 0;
+          }
           setIsPlaying(false);
           return 0;
         }
@@ -163,7 +180,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
 
     frameId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(frameId);
-  }, [isPlaying, duration]);
+  }, [isPlaying, duration, playbackSpeed, isRendering, renderAllScenes, activeSceneIndex, project.scenes.length]);
 
   const steps: { id: StepId; label: string; num: number }[] = [
     { id: 'route', label: 'Route', num: 1 },
@@ -204,7 +221,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
 
     if (snapProfile !== 'off' && targetRoute && targetRoute.points.length > 0) {
       const lastPoint = targetRoute.points[targetRoute.points.length - 1];
-      newPoints = await getRoadRoute(lastPoint, point, snapProfile);
+      newPoints = await getRoadRoute(lastPoint, point, snapProfile, routingInterval);
     }
 
     onUpdateProject((prev) => {
@@ -329,18 +346,52 @@ export const EditorPage: React.FC<EditorPageProps> = ({
     updateActiveScene({ overlays });
   };
 
+  // Camera keyframe block handlers (Oct 20 changelog)
+  const handleAddCameraBlock = (kind: 'follow' | 'still' | 'orbit' | 'tripod') => {
+    const pts = activeScene.routes[0]?.points || [];
+    const midPt = pts.length > 0 ? pts[Math.floor(pts.length / 2)] : { lng: 15, lat: 50 };
+    const tRatio = duration > 0 ? Math.min(1, Math.max(0, currentTime / duration)) : 0;
+    const newBlock = {
+      id: `cam-${Date.now()}`,
+      tRatio,
+      kind,
+      center: [midPt.lng, midPt.lat] as [number, number],
+      zoom: followZoom,
+      pitch: tilt,
+      bearing: rotateOffset,
+      easing: 'smooth' as const,
+    };
+    updateActiveScene({
+      cameraBlocks: [...(activeScene.cameraBlocks || []), newBlock],
+    });
+  };
+
+  const handleDeleteCameraBlock = (id: string) => {
+    updateActiveScene({
+      cameraBlocks: (activeScene.cameraBlocks || []).filter((cb) => cb.id !== id),
+    });
+  };
+
   // Video render handler
   const handleStartRender = () => {
     if (!stageRef.current) return;
     setIsRendering(true);
     setRenderProgress(0);
     setRenderStatus('Initializing recording...');
+    if (renderAllScenes && project.scenes.length > 1) {
+      setActiveSceneIndex(0);
+    }
     setCurrentTime(0);
     setIsPlaying(true);
 
+    const totalDurationSec =
+      renderAllScenes && project.scenes.length > 1
+        ? project.scenes.reduce((acc, s) => acc + (s.duration || 15), 0)
+        : duration;
+
     try {
       startCanvasRecording(stageRef.current, project.name, {
-        durationSec: duration,
+        durationSec: totalDurationSec,
         fps: project.fps || 30,
         onProgress: (p, status) => {
           setRenderProgress(p);
@@ -501,13 +552,15 @@ export const EditorPage: React.FC<EditorPageProps> = ({
             activeRouteId={activeRouteId}
             snapProfile={snapProfile}
             onSetSnapProfile={setSnapProfile}
+            routingInterval={routingInterval}
+            onSetRoutingInterval={setRoutingInterval}
             onSelectRoute={setActiveRouteId}
             onAddRoute={handleAddRoute}
             onDuplicateRoute={handleDuplicateRoute}
             onFitRoute={(r) => setFitRouteRequested({ ...r })}
             onUpdateRoute={handleUpdateRoute}
             onDeleteRoute={handleDeleteRoute}
-            onImportGPX={onImportGPX}
+            onImportGPX={(file, opts) => onImportGPX(file, opts, activeSceneIndex)}
           />
         )}
 
@@ -649,6 +702,14 @@ export const EditorPage: React.FC<EditorPageProps> = ({
         {currentStep === 'signs' && (
           <SignsEditorPanel
             signs={activeScene.signs}
+            defaultCenter={
+              activeScene.routes[0]?.points?.length
+                ? [
+                    activeScene.routes[0].points[Math.floor(activeScene.routes[0].points.length / 2)].lng,
+                    activeScene.routes[0].points[Math.floor(activeScene.routes[0].points.length / 2)].lat,
+                  ]
+                : [15, 50]
+            }
             onAddSign={handleAddSign}
             onUpdateSign={handleUpdateSign}
             onDeleteSign={handleDeleteSign}
@@ -680,6 +741,8 @@ export const EditorPage: React.FC<EditorPageProps> = ({
             lookAhead={lookAhead}
             onSetLookAhead={setLookAhead}
             cameraBlocks={activeScene.cameraBlocks}
+            onAddCameraBlock={handleAddCameraBlock}
+            onDeleteCameraBlock={handleDeleteCameraBlock}
           />
         )}
 
@@ -823,12 +886,19 @@ export const EditorPage: React.FC<EditorPageProps> = ({
             duration={duration}
             overlays={activeScene.overlays}
             cameraMode={cameraMode}
+            followOrient={followOrient}
             rotateOffset={rotateOffset}
+            followZoom={followZoom}
+            tilt={tilt}
+            lookAhead={lookAhead}
+            cameraBlocks={activeScene.cameraBlocks}
             includeMapCredit={project.includeMapCredit ?? true}
             isPlaying={isPlaying}
             fitRouteRequested={fitRouteRequested}
             onUpdateRoute={handleUpdateRoute}
             onAddPoint={handleAddPoint}
+            onAddSign={handleAddSign}
+            onUpdateSign={handleUpdateSign}
           />
         </main>
       </div>
@@ -926,24 +996,61 @@ export const EditorPage: React.FC<EditorPageProps> = ({
           )}
         </button>
 
-        <div className="flex-1 flex flex-col space-y-1">
+        <div className="flex-1 flex flex-col space-y-1 relative">
           <div className="flex justify-between text-[11px] text-[var(--muted)] font-mono">
             <span>{currentTime.toFixed(1)}s</span>
             <span>{duration.toFixed(1)}s</span>
           </div>
-          <input
-            type="range"
-            min={0}
-            max={duration}
-            step={0.1}
-            value={currentTime}
-            onChange={(e) => setCurrentTime(parseFloat(e.target.value))}
-            className="w-full h-1.5 bg-[var(--panel-2)] rounded-lg appearance-none cursor-pointer accent-[var(--accent)]"
-          />
+          <div className="relative flex items-center">
+            <input
+              type="range"
+              min={0}
+              max={duration}
+              step={0.1}
+              value={currentTime}
+              onChange={(e) => setCurrentTime(parseFloat(e.target.value))}
+              className="w-full h-1.5 bg-[var(--panel-2)] rounded-lg appearance-none cursor-pointer accent-[var(--accent)]"
+            />
+            {/* Camera keyframe markers on timeline (Oct 20 changelog) */}
+            {(activeScene.cameraBlocks || []).map((cb) => (
+              <span
+                key={cb.id}
+                onClick={() => setCurrentTime(cb.tRatio * duration)}
+                style={{ left: `${cb.tRatio * 100}%` }}
+                className="absolute -top-2 w-2 h-2 rounded-full bg-[var(--accent)] border border-white cursor-pointer -translate-x-1/2"
+                title={`Camera: ${cb.kind} at ${Math.round(cb.tRatio * duration)}s`}
+              />
+            ))}
+          </div>
         </div>
 
-        <div className="speed-dial text-xs font-semibold text-[var(--muted)] px-3 py-1 bg-[var(--panel-2)] rounded-md border border-[var(--border)]">
-          1.0x Speed
+        <div className="flex items-center space-x-2">
+          <select
+            value={duration}
+            onChange={(e) => updateActiveScene({ duration: Number(e.target.value) })}
+            className="text-xs font-semibold text-[var(--text)] px-2 py-1 bg-[var(--panel-2)] rounded-md border border-[var(--border)]"
+            title="Scene animation duration"
+          >
+            <option value={5}>5s</option>
+            <option value={10}>10s</option>
+            <option value={15}>15s</option>
+            <option value={20}>20s</option>
+            <option value={30}>30s</option>
+            <option value={45}>45s</option>
+            <option value={60}>60s</option>
+            <option value={120}>120s</option>
+          </select>
+
+          <button
+            type="button"
+            onClick={() =>
+              setPlaybackSpeed((s) => (s === 1 ? 2 : s === 2 ? 0.5 : 1))
+            }
+            className="speed-dial text-xs font-semibold text-[var(--muted)] hover:text-[var(--text)] px-3 py-1 bg-[var(--panel-2)] rounded-md border border-[var(--border)] transition-colors"
+            title="Click to cycle preview speed (0.5x / 1.0x / 2.0x)"
+          >
+            {playbackSpeed.toFixed(1)}x Speed
+          </button>
         </div>
       </footer>
 
