@@ -1,7 +1,8 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
-import { Route, MapSign, CameraBlock, StepId } from '../types';
+import { Route, MapSign, CameraBlock, StepId, OverlayConfig, TransportType } from '../types';
 import { buildMapStyle } from '../utils/mapStyleBuilder';
+import { calculateTrackStats } from '../utils/gpxParser';
 
 interface MapViewerProps {
   themeId: string;
@@ -16,16 +17,23 @@ interface MapViewerProps {
   activeRouteId?: string;
   signs?: MapSign[];
   cameraBlock?: CameraBlock;
+  cameraBlocks?: CameraBlock[];
   currentTime?: number;
   duration?: number;
-  overlays?: any;
+  overlays?: OverlayConfig;
   cameraMode?: 'follow' | 'still' | 'orbit' | 'tripod';
+  followOrient?: 'north' | 'heading';
   rotateOffset?: number;
+  followZoom?: number;
+  tilt?: number;
+  lookAhead?: number;
   includeMapCredit?: boolean;
   isPlaying?: boolean;
   fitRouteRequested?: Route | null;
   onUpdateRoute?: (route: Route) => void;
   onAddPoint?: (point: { lng: number; lat: number }) => void;
+  onAddSign?: (sign: MapSign) => void;
+  onUpdateSign?: (sign: MapSign) => void;
 }
 
 interface SearchPlace {
@@ -305,12 +313,19 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   duration,
   overlays,
   cameraMode,
+  followOrient = 'north',
   rotateOffset = 0,
+  followZoom = 8,
+  tilt = 0,
+  lookAhead = 0.15,
+  cameraBlocks = [],
   includeMapCredit = true,
   isPlaying,
   fitRouteRequested,
   onUpdateRoute,
   onAddPoint,
+  onAddSign,
+  onUpdateSign,
 }) => {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -319,9 +334,18 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   onAddPointRef.current = onAddPoint;
   const onUpdateRouteRef = useRef(onUpdateRoute);
   onUpdateRouteRef.current = onUpdateRoute;
+  const onAddSignRef = useRef(onAddSign);
+  onAddSignRef.current = onAddSign;
+  const onUpdateSignRef = useRef(onUpdateSign);
+  onUpdateSignRef.current = onUpdateSign;
+  const currentStepRef = useRef<StepId>(currentStep);
+  currentStepRef.current = currentStep;
 
   const [viewSize, setViewSize] = useState({ w: 0, h: 0 });
   const [, setRenderTick] = useState(0);
+  const [draggingPoint, setDraggingPoint] = useState<{ routeId: string; index: number } | null>(null);
+  const [draggingSignId, setDraggingSignId] = useState<string | null>(null);
+  const didDragRef.current = false;
 
   // Fit bounds when explicitly requested (Show route in Route step menu)
   useEffect(() => {
@@ -346,33 +370,69 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     );
   }, [fitRouteRequested]);
 
-  // Click handler for route waypoints to set Pause or toggle sharp corners
+  // Click handler for route waypoints to set Pause, toggle sharp corner, add leg, or delete point
   const handlePointClick = (routeId: string, ptIndex: number) => {
+    if (didDragRef.current) {
+      didDragRef.current = false;
+      return;
+    }
     const route = routes.find((r) => r.id === routeId);
     if (!route) return;
     const pt = route.points[ptIndex];
     const currentPause = pt.pauseSec || 0;
     const input = prompt(
-      `Point #${ptIndex + 1} options:\nEnter pause duration in seconds (0 to 20), or type 'sharp' to toggle sharp corner:`,
+      `Point #${ptIndex + 1} options:\n• Enter pause in seconds (0.5 to 20, or 0 for none)\n• Type 'sharp' to toggle sharp corner\n• Type 'leg:ferry' (or plane, train, boat, walking) to change transport from here\n• Type 'del' to delete this point:`,
       currentPause > 0 ? String(currentPause) : '2'
     );
     if (input === null) return;
-    if (input.trim().toLowerCase() === 'sharp') {
+    const trimmed = input.trim().toLowerCase();
+    if (trimmed === 'sharp') {
       const updatedPts = [...route.points];
       updatedPts[ptIndex] = { ...pt, sharpCorner: !pt.sharpCorner };
-      if (onUpdateRouteRef.current) {
-        onUpdateRouteRef.current({ ...route, points: updatedPts });
+      onUpdateRouteRef.current?.({ ...route, points: updatedPts });
+      return;
+    }
+    if (trimmed === 'del' || trimmed === 'delete') {
+      const updatedPts = route.points.filter((_, i) => i !== ptIndex);
+      onUpdateRouteRef.current?.({
+        ...route,
+        points: updatedPts,
+        stats: calculateTrackStats(updatedPts),
+      });
+      return;
+    }
+    if (trimmed.startsWith('leg:')) {
+      const transport = trimmed.slice(4).trim() as TransportType;
+      if (transport) {
+        const newLeg = {
+          id: `leg-${Date.now()}`,
+          fromPointIndex: ptIndex,
+          transportType: transport,
+          use3dSymbol: true,
+          color: route.color,
+        };
+        onUpdateRouteRef.current?.({
+          ...route,
+          legs: [...(route.legs || []), newLeg],
+        });
       }
       return;
     }
-    const sec = parseFloat(input);
+    const sec = parseFloat(trimmed);
     if (!isNaN(sec)) {
       const updatedPts = [...route.points];
       updatedPts[ptIndex] = { ...pt, pauseSec: sec > 0 ? Math.min(20, Math.max(0.5, sec)) : 0 };
-      if (onUpdateRouteRef.current) {
-        onUpdateRouteRef.current({ ...route, points: updatedPts });
-      }
+      onUpdateRouteRef.current?.({ ...route, points: updatedPts });
     }
+  };
+
+  const handlePointDoubleClick = (routeId: string, ptIndex: number) => {
+    const route = routes.find((r) => r.id === routeId);
+    if (!route) return;
+    const pt = route.points[ptIndex];
+    const updatedPts = [...route.points];
+    updatedPts[ptIndex] = { ...pt, sharpCorner: !pt.sharpCorner };
+    onUpdateRouteRef.current?.({ ...route, points: updatedPts });
   };
 
   // Photon Place Search state
@@ -397,7 +457,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     return () => ro.disconnect();
   }, []);
 
-  // Initialize MapLibre instance exactly like `i6` in mapanimator.baldinger.se
+  // Initialize MapLibre instance
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
 
@@ -409,7 +469,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         sources: {},
         layers: [{ id: 'bg', type: 'background', paint: { 'background-color': '#0b0c0e' } }],
       },
-      center: [15, 50], // Default camera `us` in mapanimator.baldinger.se
+      center: [15, 50],
       zoom: 3.5,
       bearing: 0,
       pitch: 0,
@@ -432,8 +492,23 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     map.on('resize', triggerSync);
 
     map.on('click', (e) => {
-      if (onAddPointRef.current) {
+      if (didDragRef.current) {
+        didDragRef.current = false;
+        return;
+      }
+      if (currentStepRef.current === 'route' && onAddPointRef.current) {
         onAddPointRef.current({ lng: e.lngLat.lng, lat: e.lngLat.lat });
+      } else if (currentStepRef.current === 'signs' && onAddSignRef.current) {
+        onAddSignRef.current({
+          id: `sign-${Date.now()}`,
+          lng: e.lngLat.lng,
+          lat: e.lngLat.lat,
+          text: 'Waypoint',
+          style: 'pin',
+          triggerMode: 'onPassed',
+          pauseSec: 1.5,
+          size: 1,
+        });
       }
     });
 
@@ -445,6 +520,26 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       mapRef.current = null;
     };
   }, []);
+
+  // Sync camera tilt (pitch) and bearing immediately when adjusted in the Camera step
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.easeTo({
+      pitch: tilt,
+      bearing: followOrient === 'north' ? rotateOffset : map.getBearing(),
+      duration: 200,
+    });
+  }, [tilt, rotateOffset, followOrient]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || currentStep !== 'camera' || cameraMode !== 'follow') return;
+    map.easeTo({
+      zoom: followZoom,
+      duration: 200,
+    });
+  }, [followZoom, currentStep, cameraMode]);
 
   // Dynamically build and apply the exact map style JSON whenever theme or map options change
   useEffect(() => {
@@ -498,43 +593,98 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     prevPointsCountRef.current = allPts.length;
   }, [routes]);
 
-  // Camera tracking during animation playback (Oct 17 & 20 changelog: follow, still, tripod, orbit)
+  // Camera tracking during animation playback (Oct 17 & 20 changelog: follow, still, tripod, orbit, + cameraBlocks)
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || cameraMode === 'still' || !isPlaying || !routes[0]?.points?.length) return;
+    if (!map || !isPlaying || !routes[0]?.points?.length) return;
     const progress =
       duration && duration > 0 && currentTime !== undefined
         ? Math.min(1, Math.max(0, currentTime / duration))
         : 1;
+
+    // Check if a timeline cameraBlock overrides the mode at this playhead ratio
+    const sortedBlocks = cameraBlocks.slice().sort((a, b) => a.tRatio - b.tRatio);
+    const activeBlock = sortedBlocks.filter((cb) => cb.tRatio <= progress).pop();
+    const effectiveMode = activeBlock ? activeBlock.kind : cameraMode || 'follow';
+    const effectivePitch = activeBlock ? activeBlock.pitch : tilt;
+    const effectiveZoom = activeBlock ? activeBlock.zoom : followZoom;
+
+    if (effectiveMode === 'still') {
+      if (activeBlock) {
+        map.easeTo({
+          center: activeBlock.center,
+          zoom: activeBlock.zoom,
+          pitch: activeBlock.pitch,
+          bearing: activeBlock.bearing,
+          duration: 150,
+        });
+      }
+      return;
+    }
+
     const pts = routes[0].points;
     const idx = Math.min(pts.length - 1, Math.max(0, Math.floor(pts.length * progress)));
     const target = pts[idx];
     if (!target) return;
 
-    if (cameraMode === 'follow' || !cameraMode) {
+    if (effectiveMode === 'follow') {
+      const nextPt = pts[Math.min(pts.length - 1, idx + 1)] || target;
+      const prevPt = pts[Math.max(0, idx - 1)] || target;
+      const dLng = nextPt.lng - prevPt.lng;
+      const dLat = nextPt.lat - prevPt.lat;
+      const travelBearing = (Math.atan2(dLng, dLat) * 180) / Math.PI;
+      const bearing = followOrient === 'heading' ? travelBearing : rotateOffset;
+
+      // Apply lookAhead offset along the direction of travel
+      const lookIdx = Math.min(
+        pts.length - 1,
+        Math.floor(idx + pts.length * Math.max(0, lookAhead * 0.25))
+      );
+      const lookTarget = pts[lookIdx] || target;
+
       map.easeTo({
-        center: [target.lng, target.lat],
-        bearing: rotateOffset,
+        center: [
+          target.lng + (lookTarget.lng - target.lng) * 0.6,
+          target.lat + (lookTarget.lat - target.lat) * 0.6,
+        ],
+        zoom: effectiveZoom,
+        pitch: effectivePitch,
+        bearing,
         duration: 100,
       });
-    } else if (cameraMode === 'tripod') {
+    } else if (effectiveMode === 'tripod') {
       // Stand in one spot (the start point) and swivel to watch the symbol go by
       const origin = pts[0];
       const angle = (Math.atan2(target.lat - origin.lat, target.lng - origin.lng) * 180) / Math.PI;
       map.easeTo({
+        pitch: effectivePitch,
         bearing: 90 - angle,
         duration: 100,
       });
-    } else if (cameraMode === 'orbit') {
+    } else if (effectiveMode === 'orbit') {
       // Smoothly orbit 360 degrees around the symbol over the trip
       const orbitBearing = progress * 360;
       map.easeTo({
         center: [target.lng, target.lat],
+        zoom: effectiveZoom,
+        pitch: effectivePitch,
         bearing: orbitBearing,
         duration: 100,
       });
     }
-  }, [currentTime, duration, cameraMode, isPlaying, routes, rotateOffset]);
+  }, [
+    currentTime,
+    duration,
+    cameraMode,
+    followOrient,
+    followZoom,
+    tilt,
+    lookAhead,
+    cameraBlocks,
+    isPlaying,
+    routes,
+    rotateOffset,
+  ]);
 
   // Photon Place Search keyboard shortcut `/` and click outside
   useEffect(() => {
@@ -648,11 +798,110 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   const visibleResults = hasQuery ? searchResults : [];
   const visibleStatus = hasQuery ? searchStatus : 'idle';
 
+  const handleWorkspacePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!map || !workspaceRef.current) return;
+    if (!draggingPoint && !draggingSignId) return;
+
+    const rect = workspaceRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const lngLat = map.unproject([x, y]);
+    didDragRef.current = true;
+
+    if (draggingPoint) {
+      const route = routes.find((r) => r.id === draggingPoint.routeId);
+      if (!route) return;
+      const updatedPts = [...route.points];
+      updatedPts[draggingPoint.index] = {
+        ...updatedPts[draggingPoint.index],
+        lng: lngLat.lng,
+        lat: lngLat.lat,
+      };
+      onUpdateRouteRef.current?.({
+        ...route,
+        points: updatedPts,
+      });
+    } else if (draggingSignId && signs) {
+      const sign = signs.find((s) => s.id === draggingSignId);
+      if (!sign) return;
+      onUpdateSignRef.current?.({
+        ...sign,
+        lng: lngLat.lng,
+        lat: lngLat.lat,
+      });
+    }
+  };
+
+  const handleWorkspacePointerUp = () => {
+    if (draggingPoint) {
+      const route = routes.find((r) => r.id === draggingPoint.routeId);
+      if (route) {
+        onUpdateRouteRef.current?.({
+          ...route,
+          stats: calculateTrackStats(route.points),
+        });
+      }
+      setDraggingPoint(null);
+      map?.dragPan.enable();
+    }
+    if (draggingSignId) {
+      setDraggingSignId(null);
+      map?.dragPan.enable();
+    }
+  };
+
+  // Click on route line to insert a point in between (Help Step 1)
+  const handleRouteLineClick = (e: React.MouseEvent<SVGPathElement>, route: Route) => {
+    if (currentStep !== 'route' || !map || !workspaceRef.current || route.points.length < 2) return;
+    e.stopPropagation();
+    const rect = workspaceRef.current.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+    const lngLat = map.unproject([clickX, clickY]);
+
+    // Find closest segment [i, i+1] in screen space
+    let bestSegIdx = 0;
+    let bestDistSq = Infinity;
+    for (let i = 0; i < route.points.length - 1; i++) {
+      const a = map.project([route.points[i].lng, route.points[i].lat]);
+      const b = map.project([route.points[i + 1].lng, route.points[i + 1].lat]);
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const lenSq = dx * dx + dy * dy || 1;
+      const t = Math.max(0, Math.min(1, ((clickX - a.x) * dx + (clickY - a.y) * dy) / lenSq));
+      const projX = a.x + t * dx;
+      const projY = a.y + t * dy;
+      const distSq = (clickX - projX) ** 2 + (clickY - projY) ** 2;
+      if (distSq < bestDistSq) {
+        bestDistSq = distSq;
+        bestSegIdx = i;
+      }
+    }
+
+    const prevEle = route.points[bestSegIdx].ele;
+    const nextEle = route.points[bestSegIdx + 1].ele;
+    const interpEle =
+      prevEle !== undefined && nextEle !== undefined ? Math.round((prevEle + nextEle) / 2) : prevEle;
+
+    const updatedPts = [
+      ...route.points.slice(0, bestSegIdx + 1),
+      { lng: lngLat.lng, lat: lngLat.lat, ele: interpEle },
+      ...route.points.slice(bestSegIdx + 1),
+    ];
+    onUpdateRouteRef.current?.({
+      ...route,
+      points: updatedPts,
+      stats: calculateTrackStats(updatedPts),
+    });
+  };
+
   return (
     <div
       ref={workspaceRef}
       className={`workspace${currentStep === 'route' ? ' is-drawing' : ''}`}
       style={{ width: '100%', height: '100%' }}
+      onPointerMove={handleWorkspacePointerMove}
+      onPointerUp={handleWorkspacePointerUp}
     >
       <div ref={mapContainerRef} className="map" translate="no" />
 
@@ -666,16 +915,33 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         >
           {routes.map((route) => {
             if (route.points.length === 0) return null;
-            const progress =
+            const rawProgress =
               duration && duration > 0 && currentTime !== undefined
                 ? Math.min(1, Math.max(0, currentTime / duration))
                 : 1;
+            const offsetRatio =
+              duration && duration > 0 && route.startOffsetSec
+                ? Math.min(0.9, Math.max(0, route.startOffsetSec / duration))
+                : 0;
+            const progress =
+              rawProgress <= offsetRatio
+                ? 0
+                : Math.min(1, (rawProgress - offsetRatio) / (1 - offsetRatio));
 
             const visibleCount =
               progress >= 1
                 ? route.points.length
                 : Math.max(1, Math.round(route.points.length * progress));
             const currentPoints = route.points.slice(0, visibleCount);
+
+            // Resolve active leg transport & color at current tip index
+            const tipPtIdx = Math.max(0, visibleCount - 1);
+            const sortedLegs = (route.legs || [])
+              .slice()
+              .sort((a, b) => a.fromPointIndex - b.fromPointIndex);
+            const activeLeg = sortedLegs.filter((l) => l.fromPointIndex <= tipPtIdx).pop();
+            const activeTransport = activeLeg ? activeLeg.transportType : route.transportType;
+            const activeColor = activeLeg?.color || route.color || '#ff4d2e';
 
             const projected = currentPoints.map((pt) => {
               const p = map.project([pt.lng, pt.lat]);
@@ -691,8 +957,8 @@ export const MapViewer: React.FC<MapViewerProps> = ({
             const d =
               projected.length >= 2
                 ? projected
-                    .map((p, idx) => `${idx ? 'L' : 'M'}${p[0].toFixed(1)} ${p[1].toFixed(1)}`)
-                    .join('')
+                .map((p, idx) => `${idx ? 'L' : 'M'}${p[0].toFixed(1)} ${p[1].toFixed(1)}`)
+                .join('')
                 : '';
 
             // Compute arrow heading at the tip of the line
@@ -725,11 +991,16 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                     <path
                       d={d}
                       fill="none"
-                      stroke={route.color || '#ff4d2e'}
+                      stroke={activeColor}
                       strokeWidth={strokeW}
                       strokeLinecap="round"
                       strokeLinejoin="round"
                       strokeDasharray={dashArray}
+                      style={{
+                        pointerEvents: currentStep === 'route' ? 'stroke' : 'none',
+                        cursor: currentStep === 'route' ? 'copy' : 'default',
+                      }}
+                      onClick={(e) => handleRouteLineClick(e, route)}
                     />
                   </>
                 )}
@@ -742,12 +1013,12 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                   stroke={route.color || '#ff4d2e'}
                   strokeWidth={Math.max(2, strokeW * 0.45)}
                 />
-                {/* Animated Vehicle / Symbol at Tip with SymbolScale (Oct 8, 21, 27 changelogs) */}
+                {/* Animated Vehicle / Symbol at Tip with SymbolScale & Multi-Leg transport */}
                 {tipPos && projected.length >= 2 && (
                   <g transform={`translate(${tipPos[0]}, ${tipPos[1]}) rotate(${headAngle})`}>
                     {renderVehicleShape(
-                      route.transportType,
-                      route.color || '#ff4d2e',
+                      activeTransport,
+                      activeColor,
                       (route.symbolScale || 1.0) * scale
                     )}
                   </g>
@@ -759,9 +1030,58 @@ export const MapViewer: React.FC<MapViewerProps> = ({
           {/* Signs, Photos & Waypoints (Oct 8 & 29 changelog) */}
           {signs &&
             (() => {
-              const activePhotos = signs.filter((s) => s.style === 'photo' && s.photoUrl);
-              return signs.map((sign) => {
+              const progressRatio =
+                duration && duration > 0 && currentTime !== undefined
+                  ? Math.min(1, Math.max(0, currentTime / duration))
+                  : 1;
+              const mainPts = routes[0]?.points || [];
+              const currIdx = Math.min(
+                mainPts.length - 1,
+                Math.max(0, Math.floor(mainPts.length * progressRatio))
+              );
+
+              // Filter visible signs by triggerMode ('always' | 'onPassed' | 'whilePassing')
+              const visibleSigns = signs.filter((sign) => {
+                // While editing in the Signs step and not playing, show all signs so user can see/drag them
+                if (currentStep === 'signs' && !isPlaying) return true;
+                if (sign.triggerMode === 'always' || mainPts.length === 0) return true;
+
+                // Find nearest point index on main route
+                let closestIdx = 0;
+                let minDistSq = Infinity;
+                for (let i = 0; i < mainPts.length; i++) {
+                  const dSq =
+                    (mainPts[i].lng - sign.lng) ** 2 + (mainPts[i].lat - sign.lat) ** 2;
+                  if (dSq < minDistSq) {
+                    minDistSq = dSq;
+                    closestIdx = i;
+                  }
+                }
+                if (sign.triggerMode === 'onPassed') {
+                  return currIdx >= closestIdx;
+                }
+                if (sign.triggerMode === 'whilePassing') {
+                  const windowPts = Math.max(2, Math.ceil(mainPts.length * 0.1));
+                  return Math.abs(currIdx - closestIdx) <= windowPts;
+                }
+                return true;
+              });
+
+              const activePhotos = visibleSigns.filter((s) => s.style === 'photo' && s.photoUrl);
+              return visibleSigns.map((sign) => {
                 const p = map.project([sign.lng, sign.lat]);
+                const signDragProps =
+                  currentStep === 'signs'
+                    ? {
+                        style: { pointerEvents: 'all' as const, cursor: 'grab' },
+                        onPointerDown: (e: React.PointerEvent) => {
+                          e.stopPropagation();
+                          didDragRef.current = false;
+                          setDraggingSignId(sign.id);
+                          map.dragPan.disable();
+                        },
+                      }
+                    : {};
 
                 // Side-by-side photo layout on leader strings (Oct 29 changelog)
                 if (sign.style === 'photo' && sign.photoUrl) {
@@ -772,7 +1092,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                   const cardY = -65 * scale;
 
                   return (
-                    <g key={sign.id} transform={`translate(${p.x}, ${p.y})`}>
+                    <g key={sign.id} transform={`translate(${p.x}, ${p.y})`} {...signDragProps}>
                       <ellipse cx={0} cy={0} rx={4 * scale} ry={2 * scale} fill="rgba(0,0,0,0.4)" />
                       {/* Leader string from ground spot to photo card */}
                       <path
@@ -811,7 +1131,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
                 // Preset Signs: Camp, Start, Finish, Hotel, Pin (Oct 8 changelog)
                 return (
-                  <g key={sign.id} transform={`translate(${p.x}, ${p.y})`}>
+                  <g key={sign.id} transform={`translate(${p.x}, ${p.y})`} {...signDragProps}>
                     <ellipse cx={0} cy={0} rx={5 * scale} ry={2 * scale} fill="rgba(0,0,0,0.3)" />
 
                     {sign.style === 'camp' ? (
@@ -922,6 +1242,64 @@ export const MapViewer: React.FC<MapViewerProps> = ({
             </g>
           )}
 
+          {/* Overlays HUD: Live Animated Elevation Profile Chart */}
+          {overlays?.showElevationProfile &&
+            (() => {
+              const pts = routes[0]?.points || [];
+              const elePts = pts.filter((p) => p.ele !== undefined && Number.isFinite(p.ele));
+              if (elePts.length < 2) return null;
+
+              const progressRatio =
+                duration && duration > 0 && currentTime !== undefined
+                  ? Math.min(1, Math.max(0, currentTime / duration))
+                  : 1;
+              const chartW = 240 * scale;
+              const chartH = 44 * scale;
+              const minE = Math.min(...elePts.map((p) => p.ele!));
+              const maxE = Math.max(...elePts.map((p) => p.ele!));
+              const spanE = Math.max(10, maxE - minE);
+
+              const polyPoints = elePts
+                .map((p, idx) => {
+                  const x = (idx / (elePts.length - 1)) * chartW;
+                  const y = chartH - ((p.ele! - minE) / spanE) * (chartH - 8) - 4;
+                  return `${x.toFixed(1)},${y.toFixed(1)}`;
+                })
+                .join(' ');
+              const areaPoints = `0,${chartH} ${polyPoints} ${chartW},${chartH}`;
+              const cursorX = progressRatio * chartW;
+
+              return (
+                <g transform={`translate(${frame.x + 24}, ${frame.y + frame.height - 96 * scale})`}>
+                  <rect
+                    x="-8"
+                    y="-8"
+                    width={chartW + 16}
+                    height={chartH + 16}
+                    rx="6"
+                    fill="rgba(15, 20, 25, 0.72)"
+                    stroke="rgba(255, 255, 255, 0.14)"
+                  />
+                  <polygon points={areaPoints} fill={routes[0]?.color || '#ff4d2e'} opacity={0.28} />
+                  <polyline
+                    points={polyPoints}
+                    fill="none"
+                    stroke={routes[0]?.color || '#ff4d2e'}
+                    strokeWidth="2"
+                  />
+                  <line
+                    x1={cursorX}
+                    y1={0}
+                    x2={cursorX}
+                    y2={chartH}
+                    stroke="#ffffff"
+                    strokeWidth="1.5"
+                    strokeDasharray="2 2"
+                  />
+                </g>
+              );
+            })()}
+
           {/* Overlays HUD: Distance, Speed, Altitude, Climb & Descent Telemetry (Oct 18 & 21 changelog) */}
           {(overlays?.showDistance ||
             overlays?.showAltitude ||
@@ -953,37 +1331,66 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                 }
               }
 
+              // Unit conversion (metric / imperial / nautical)
+              const unit = overlays?.unit || 'metric';
+              const distMult = unit === 'imperial' ? 0.621371 : unit === 'nautical' ? 0.539957 : 1;
+              const distUnit = unit === 'imperial' ? 'mi' : unit === 'nautical' ? 'nm' : 'km';
+              const eleMult = unit === 'imperial' || unit === 'nautical' ? 3.28084 : 1;
+              const eleUnit = unit === 'imperial' || unit === 'nautical' ? 'ft' : 'm';
+              const speedUnit = unit === 'imperial' ? 'mph' : unit === 'nautical' ? 'kn' : 'km/h';
+
+              const distVal = routes[0]?.stats?.distanceKm
+                ? (routes[0].stats.distanceKm * progressRatio * distMult).toFixed(1)
+                : '0.0';
+              const eleVal =
+                currentEle !== undefined ? `${Math.round(currentEle * eleMult)}${eleUnit}` : `-- ${eleUnit}`;
+              const gainVal = Math.round(currentGain * eleMult);
+              const lossVal = Math.round(currentLoss * eleMult);
+              const speedVal = routes[0]?.stats?.avgSpeedKmh
+                ? `${(routes[0].stats.avgSpeedKmh * distMult).toFixed(1)} ${speedUnit}`
+                : `-- ${speedUnit}`;
+
+              // Theme styling
+              const hudTheme = overlays?.theme || 'dark';
+              const bgFill =
+                hudTheme === 'light'
+                  ? 'rgba(255, 255, 255, 0.88)'
+                  : hudTheme === 'vintage'
+                  ? 'rgba(244, 232, 206, 0.9)'
+                  : hudTheme === 'bold'
+                  ? 'rgba(255, 77, 46, 0.9)'
+                  : hudTheme === 'outdoor'
+                  ? 'rgba(244, 48, 36, 0.85)'
+                  : hudTheme === 'minimal'
+                  ? 'rgba(0, 0, 0, 0.45)'
+                  : 'rgba(15, 20, 25, 0.8)';
+              const textFill =
+                hudTheme === 'light' || hudTheme === 'vintage' ? '#1b1f24' : '#ffffff';
+
               return (
                 <g transform={`translate(${frame.x + 24}, ${frame.y + frame.height - 30})`}>
                   <rect
                     x="-8"
                     y="-24"
-                    width={280 * scale}
+                    width={310 * scale}
                     height={36 * scale}
                     rx="6"
-                    fill="rgba(15, 20, 25, 0.8)"
+                    fill={bgFill}
                     stroke="rgba(255, 255, 255, 0.15)"
                   />
                   <text
                     y="0"
-                    fill="#ffffff"
+                    fill={textFill}
                     fontSize={Math.max(11, 13 * scale)}
                     fontWeight="700"
                     fontFamily="monospace"
                   >
-                    {overlays.showDistance &&
-                      (routes[0]?.stats?.distanceKm
-                        ? `${(routes[0].stats.distanceKm * progressRatio).toFixed(1)} km`
-                        : '0.0 km')}
-                    {overlays.showAltitude &&
-                      (currentEle !== undefined ? ` · ${currentEle}m` : ' · -- m')}
+                    {overlays.showDistance && `${distVal} ${distUnit}`}
+                    {overlays.showAltitude && ` · ${eleVal}`}
                     {overlays.showClimbDescent
-                      ? ` · ▲+${Math.round(currentGain)}m ▼-${Math.round(currentLoss)}m`
+                      ? ` · ▲+${gainVal}${eleUnit} ▼-${lossVal}${eleUnit}`
                       : ''}
-                    {overlays.showSpeed &&
-                      (routes[0]?.stats?.avgSpeedKmh
-                        ? ` · ${routes[0].stats.avgSpeedKmh} km/h`
-                        : ' · -- km/h')}
+                    {overlays.showSpeed && ` · ${speedVal}`}
                   </text>
                 </g>
               );
@@ -1032,9 +1439,20 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                 return (
                   <g
                     key={`${route.id}-pt-${idx}`}
+                    style={{ pointerEvents: 'all', cursor: 'grab' }}
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                      didDragRef.current = false;
+                      setDraggingPoint({ routeId: route.id, index: idx });
+                      map.dragPan.disable();
+                    }}
                     onClick={(e) => {
                       e.stopPropagation();
                       handlePointClick(route.id, idx);
+                    }}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      handlePointDoubleClick(route.id, idx);
                     }}
                     className="cursor-pointer"
                   >
