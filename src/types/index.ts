@@ -172,12 +172,33 @@ export interface Scene {
   overlays: OverlayConfig;
 }
 
+// New simplified preset type — maps to existing CameraMode under the hood
+export type CameraMode = 'follow' | 'still' | 'tripod' | 'orbit';
+export type CameraModePreset = 'fly_along' | 'follow_north_up' | 'whole_tour';
+export type AspectRatioOption = '16:9' | '9:16' | '1:1';
+export type DurationPreset = 20 | 40 | 60 | 'custom';
+
+// Thin overlay — extend MapProject instead of replacing it
+export interface CameraSettings {
+  preset: CameraModePreset;
+  // Advanced overrides (optional — only written when user changes them)
+  zoom?: number;
+  pitch?: number;
+  bearing?: number;
+  smoothness?: number; // 0–1, default 0.5
+}
+
 export interface MapProject {
   id: string;
   name: string;
   createdAt: number;
   updatedAt: number;
   aspect: '16:9' | '9:16' | '1:1' | '4:5' | '4:3' | '21:9';
+  aspectRatio?: AspectRatioOption; // NEW — studio camera format
+  duration?: number; // Overall project duration in seconds
+  cameraPreset?: CameraModePreset; // NEW — defaults to 'fly_along'
+  cameraSettings?: CameraSettings; // NEW — optional advanced overrides
+  durationPreset?: DurationPreset; // NEW — tracks which button is active
   size: 480 | 720 | 1080 | 1440 | 2160;
   fps: 24 | 25 | 30 | 50 | 60; // Oct 18: 50 fps export
   includeMapCredit?: boolean; // Oct 30: Toggle map credit in video

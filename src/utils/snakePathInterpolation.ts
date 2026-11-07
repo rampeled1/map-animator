@@ -131,3 +131,15 @@ export function getSmoothSnakePath(
     segmentIndex: segIdx,
   };
 }
+
+/**
+ * Convenient helper to fetch vehicle coordinate tip at normalized progress t in [0, 1]
+ */
+export function getPositionAtProgress(
+  points: RoutePoint[],
+  progress: number
+): RoutePoint | null {
+  const sample = getSmoothSnakePath(points, progress);
+  return sample ? sample.tipPoint : null;
+}
+

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { MapProject, StepId, Route, MapTheme, RoutePoint, MapSign, OverlayConfig, CameraBlock } from '../types';
+import { MapProject, StepId, Route, MapTheme, RoutePoint, MapSign, OverlayConfig, CameraBlock, CameraModePreset, AspectRatioOption, DurationPreset } from '../types';
 import { MapViewer } from './MapViewer';
 import { RouteEditorPanel } from './RouteEditorPanel';
 import { SignsEditorPanel } from './SignsEditorPanel';
@@ -11,6 +11,7 @@ import { SnapProfile, getRoadRoute } from '../utils/roadRouter';
 import { calculateTrackStats } from '../utils/gpxParser';
 import { exportProjectFile } from '../utils/projectStorage';
 import { startCanvasRecording } from '../utils/videoRecorder';
+import { mapPresetToCameraBlocks } from '../utils/cameraPresetMapper';
 import {
   PRIMARY_THEMES,
   MORE_THEMES_LIST,
@@ -69,6 +70,12 @@ function formatTimeSec(sec: number): string {
   const m = Math.floor(sec / 60);
   const s = (sec % 60).toFixed(1);
   return `${m}:${Number(s) < 10 ? '0' : ''}${s}`;
+}
+
+function formatTimelineClock(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s < 10 ? '0' : ''}${s}`;
 }
 
 export const EditorPage: React.FC<EditorPageProps> = ({
@@ -259,10 +266,10 @@ export const EditorPage: React.FC<EditorPageProps> = ({
 
   const steps: { id: StepId; label: string; num: number }[] = [
     { id: 'route', label: 'Route', num: 1 },
-    { id: 'map', label: 'Map', num: 2 },
-    { id: 'signs', label: 'Signs', num: 3 },
-    { id: 'overlays', label: 'Overlays', num: 4 },
-    { id: 'camera', label: 'Camera', num: 5 },
+    { id: 'camera', label: 'Camera', num: 2 },
+    { id: 'map', label: 'Map', num: 3 },
+    { id: 'signs', label: 'Signs', num: 4 },
+    { id: 'overlays', label: 'Overlays', num: 5 },
     { id: 'preview', label: 'Preview & export', num: 6 },
   ];
 
@@ -482,6 +489,78 @@ export const EditorPage: React.FC<EditorPageProps> = ({
       if (activeCameraBlock.orbitDirection !== undefined) setOrbitDirection(activeCameraBlock.orbitDirection);
     }
   }, [activeCameraBlock?.id]);
+
+  const cameraPreset: CameraModePreset = project.cameraPreset || 'fly_along';
+  const aspectRatio: AspectRatioOption = (project.aspectRatio || project.aspect || '16:9') as AspectRatioOption;
+  const durationPreset: DurationPreset = project.durationPreset || (duration === 20 ? 20 : duration === 40 ? 40 : duration === 60 ? 60 : 'custom');
+
+  const handleSetCameraPreset = (preset: CameraModePreset) => {
+    pushUndoSnapshot(true);
+    const pts = activeScene.routes[0]?.points || [];
+    const newBlocks = mapPresetToCameraBlocks(preset, pts);
+
+    onUpdateProject((prev) => ({
+      ...prev,
+      cameraPreset: preset,
+      cameraSettings: {
+        ...prev.cameraSettings,
+        preset,
+      },
+      updatedAt: Date.now(),
+      scenes: prev.scenes.map((s, idx) =>
+        idx === activeSceneIndex
+          ? {
+              ...s,
+              cameraBlocks: newBlocks,
+            }
+          : s
+      ),
+    }));
+
+    if (preset === 'fly_along') {
+      setCameraMode('follow');
+      setFollowOrient('heading');
+      setTilt(55);
+      setFollowZoom(15);
+    } else if (preset === 'follow_north_up') {
+      setCameraMode('follow');
+      setFollowOrient('north');
+      setTilt(35);
+      setFollowZoom(14);
+      setRotateOffset(0);
+    } else if (preset === 'whole_tour') {
+      setCameraMode('still');
+      setTilt(10);
+    }
+  };
+
+  const handleSetAspectRatio = (newAspect: AspectRatioOption) => {
+    pushUndoSnapshot(true);
+    onUpdateProject((prev) => ({
+      ...prev,
+      aspect: newAspect,
+      aspectRatio: newAspect,
+      updatedAt: Date.now(),
+    }));
+  };
+
+  const handleSetDuration = (newDuration: number, preset?: DurationPreset) => {
+    pushUndoSnapshot(true);
+    onUpdateProject((prev) => ({
+      ...prev,
+      duration: newDuration,
+      durationPreset: preset || (newDuration === 20 ? 20 : newDuration === 40 ? 40 : newDuration === 60 ? 60 : 'custom'),
+      updatedAt: Date.now(),
+      scenes: prev.scenes.map((s, idx) =>
+        idx === activeSceneIndex
+          ? {
+              ...s,
+              duration: newDuration,
+            }
+          : s
+      ),
+    }));
+  };
 
   const handleMapCameraChange = (cam: {
     zoom: number;
@@ -857,213 +936,320 @@ export const EditorPage: React.FC<EditorPageProps> = ({
           />
         )}
 
-        {/* Step 5: Camera */}
-        {currentStep === 'camera' && (
-          <CameraEditorPanel
-            cameraMode={cameraMode}
-            onSetCameraMode={(mode) => {
-              setCameraMode(mode);
-              handleUpdateActiveCameraBlock({ kind: mode });
-            }}
-            followOrient={followOrient}
-            onSetFollowOrient={(orient) => {
-              setFollowOrient(orient);
-              handleUpdateActiveCameraBlock({ followOrient: orient });
-            }}
-            rotateOffset={rotateOffset}
-            onSetRotateOffset={(deg) => {
-              setRotateOffset(deg);
-              handleUpdateActiveCameraBlock({ rotateOffset: deg, bearing: deg });
-            }}
-            followZoom={followZoom}
-            onSetFollowZoom={(z) => {
-              setFollowZoom(z);
-              handleUpdateActiveCameraBlock({ zoom: z });
-            }}
-            tilt={tilt}
-            onSetTilt={(t) => {
-              setTilt(t);
-              handleUpdateActiveCameraBlock({ pitch: t });
-            }}
-            distanceKm={distanceKm}
-            onSetDistanceKm={(d) => {
-              setDistanceKm(d);
-              handleUpdateActiveCameraBlock({ distanceKm: d });
-            }}
-            heightKm={heightKm}
-            onSetHeightKm={(h) => {
-              setHeightKm(h);
-              handleUpdateActiveCameraBlock({ heightKm: h });
-            }}
-            orbitDirection={orbitDirection}
-            onSetOrbitDirection={(dir) => {
-              setOrbitDirection(dir);
-              handleUpdateActiveCameraBlock({ orbitDirection: dir });
-            }}
-            currentTime={currentTime}
-            activeCameraBlock={activeCameraBlock}
-          />
-        )}
-
-        {/* Step 6: Preview & Export */}
-        {currentStep === 'preview' && (
-          <aside className="panel w-80 h-full overflow-y-auto p-4 flex flex-col space-y-4 text-xs">
-            <div>
-              <h2>Preview & export</h2>
-              <p className="lede">Renders a high-bitrate video directly in your browser.</p>
-            </div>
-            <div className="group">
-              <div className="group-title">Resolution</div>
-              <select
-                value={project.size}
-                onChange={(e) =>
-                  onUpdateProject((prev) => ({
-                    ...prev,
-                    size: Number(e.target.value) as any,
-                    updatedAt: Date.now(),
-                  }))
-                }
-                className="field"
+        {/* Step 2: Camera Studio 2-Column Mode */}
+        {currentStep === 'camera' ? (
+          <div className="flex-1 flex h-full overflow-hidden bg-[#0f172a]">
+            {/* Left 60%: Live Preview */}
+            <div className="w-[60%] h-full p-6 flex flex-col justify-center items-center relative overflow-hidden">
+              <div
+                className={`relative rounded-2xl overflow-hidden shadow-2xl border border-slate-800 bg-[#020617] flex items-center justify-center transition-all duration-300 ${
+                  aspectRatio === '9:16'
+                    ? 'h-[74vh] aspect-[9/16] max-w-full'
+                    : aspectRatio === '1:1'
+                    ? 'h-[74vh] aspect-square max-w-full'
+                    : 'w-full aspect-[16/9] max-h-[74vh]'
+                }`}
               >
-                <option value={480}>480p</option>
-                <option value={720}>720p HD</option>
-                <option value={1080}>1080p Full HD (Recommended)</option>
-                <option value={1440}>1440p 2K</option>
-                <option value={2160}>2160p 4K</option>
-              </select>
-            </div>
-
-            <div className="group">
-              <div className="group-title">Frame rate</div>
-              <select
-                value={project.fps}
-                onChange={(e) =>
-                  onUpdateProject((prev) => ({
-                    ...prev,
-                    fps: Number(e.target.value) as any,
-                    updatedAt: Date.now(),
-                  }))
-                }
-                className="field"
-              >
-                <option value={24}>24 fps (Cinema)</option>
-                <option value={25}>25 fps (PAL)</option>
-                <option value={30}>30 fps (Standard)</option>
-                <option value={50}>50 fps (European Broadcast / PAL HD)</option>
-                <option value={60}>60 fps (Smooth 60fps)</option>
-              </select>
-            </div>
-
-            {/* Official FAQ feature: All scenes in one video toggle */}
-            {project.scenes.length > 1 && (
-              <div className="group space-y-1">
-                <div className="group-title">Multi-scene video</div>
-                <label className="toggle">
-                  All scenes in one video
-                  <input
-                    type="checkbox"
-                    checked={renderAllScenes}
-                    onChange={(e) => setRenderAllScenes(e.target.checked)}
+                <main ref={stageRef} className="w-full h-full relative">
+                  <MapViewer
+                    themeId={activeScene.mapThemeId}
+                    mapLabels={mapLabels}
+                    labelLang={labelLang || undefined}
+                    regions={regions}
+                    terrain={terrain}
+                    aspect={project.aspect}
+                    aspectRatio={aspectRatio}
+                    size={project.size}
+                    routes={activeScene.routes}
+                    signs={activeScene.signs}
+                    currentStep={currentStep}
+                    currentTime={currentTime}
+                    duration={duration}
+                    overlays={activeScene.overlays}
+                    cameraMode={cameraMode}
+                    cameraPreset={cameraPreset}
+                    followOrient={followOrient}
+                    rotateOffset={rotateOffset}
+                    followZoom={followZoom}
+                    tilt={tilt}
+                    lookAhead={lookAhead}
+                    distanceKm={distanceKm}
+                    heightKm={heightKm}
+                    orbitDirection={orbitDirection}
+                    cameraBlocks={activeScene.cameraBlocks}
+                    includeMapCredit={project.includeMapCredit ?? true}
+                    isPlaying={isPlaying}
+                    fitRouteRequested={fitRouteRequested}
+                    onUpdateRoute={handleUpdateRoute}
+                    onAddPoint={handleAddPoint}
+                    onAddSign={handleAddSign}
+                    onUpdateSign={handleUpdateSign}
+                    onMapCameraChange={handleMapCameraChange}
                   />
-                </label>
-                <p className="hint">
-                  {renderAllScenes
-                    ? 'Renders all scenes sequentially into a single sequence video.'
-                    : 'Renders only the active scene.'}
-                </p>
-              </div>
-            )}
+                </main>
 
-            {/* Oct 30 changelog: Map credit on your page instead */}
-            <div className="group space-y-2">
-              <div className="group-title">Map Credit</div>
-              <label className="toggle">
-                Include map credit in video
+                {/* Aspect Ratio Badge Overlay */}
+                <div className="absolute top-3 left-3 bg-black/75 backdrop-blur-md px-2.5 py-1 rounded-md text-[11px] font-mono text-slate-300 pointer-events-none z-10 border border-white/10 shadow">
+                  {aspectRatio === '9:16'
+                    ? '9:16 · 1080×1920'
+                    : aspectRatio === '1:1'
+                    ? '1:1 · 1080×1080'
+                    : '16:9 · 1920×1080'}
+                </div>
+              </div>
+
+              {/* Live Preview Timeline Bar */}
+              <div className="w-full max-w-2xl mt-4 flex items-center space-x-3 bg-[#1e293b]/95 backdrop-blur border border-slate-700/80 px-4 py-2.5 rounded-xl shadow-lg z-10">
+                <button
+                  type="button"
+                  onClick={() => setIsPlaying(!isPlaying)}
+                  className="p-2 rounded-lg bg-teal-500/10 text-teal-400 hover:bg-teal-500/20 transition-colors cursor-pointer"
+                  title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
+                >
+                  {isPlaying ? (
+                    <Pause className="w-4 h-4 fill-current" />
+                  ) : (
+                    <Play className="w-4 h-4 fill-current ml-0.5" />
+                  )}
+                </button>
+
+                <span className="text-xs font-mono text-slate-300 min-w-[75px]">
+                  {formatTimelineClock(currentTime)} / {formatTimelineClock(duration)}
+                </span>
+
                 <input
-                  type="checkbox"
-                  checked={project.includeMapCredit ?? true}
-                  onChange={(e) =>
-                    onUpdateProject((prev) => ({
-                      ...prev,
-                      includeMapCredit: e.target.checked,
-                      updatedAt: Date.now(),
-                    }))
-                  }
+                  type="range"
+                  min={0}
+                  max={duration}
+                  step={0.1}
+                  value={currentTime}
+                  onChange={(e) => setCurrentTime(parseFloat(e.target.value))}
+                  className="flex-1 h-1.5 accent-teal-500 bg-slate-700 rounded-lg cursor-pointer"
                 />
-              </label>
-              <div className="p-2.5 rounded-lg bg-[var(--panel-2)] border border-[var(--border)] space-y-1.5">
-                <div className="flex justify-between items-center text-[10px] text-[var(--muted)]">
-                  <span>Publish Attribution Credit:</span>
+              </div>
+            </div>
+
+            {/* Right 40%: Camera Studio Configuration Panel */}
+            <div className="w-[40%] min-w-[360px] max-w-[460px] h-full overflow-y-auto bg-[#0f172a] border-l border-slate-800 p-6">
+              <CameraEditorPanel
+                cameraPreset={cameraPreset}
+                onSetCameraPreset={handleSetCameraPreset}
+                aspectRatio={aspectRatio}
+                onSetAspectRatio={handleSetAspectRatio}
+                durationPreset={durationPreset}
+                duration={duration}
+                onSetDuration={handleSetDuration}
+                cameraMode={cameraMode}
+                onSetCameraMode={(mode) => {
+                  setCameraMode(mode);
+                  handleUpdateActiveCameraBlock({ kind: mode });
+                }}
+                followOrient={followOrient}
+                onSetFollowOrient={(orient) => {
+                  setFollowOrient(orient);
+                  handleUpdateActiveCameraBlock({ followOrient: orient });
+                }}
+                rotateOffset={rotateOffset}
+                onSetRotateOffset={(deg) => {
+                  setRotateOffset(deg);
+                  handleUpdateActiveCameraBlock({ rotateOffset: deg, bearing: deg });
+                }}
+                followZoom={followZoom}
+                onSetFollowZoom={(z) => {
+                  setFollowZoom(z);
+                  handleUpdateActiveCameraBlock({ zoom: z });
+                }}
+                tilt={tilt}
+                onSetTilt={(t) => {
+                  setTilt(t);
+                  handleUpdateActiveCameraBlock({ pitch: t });
+                }}
+                distanceKm={distanceKm}
+                onSetDistanceKm={(d) => {
+                  setDistanceKm(d);
+                  handleUpdateActiveCameraBlock({ distanceKm: d });
+                }}
+                heightKm={heightKm}
+                onSetHeightKm={(h) => {
+                  setHeightKm(h);
+                  handleUpdateActiveCameraBlock({ heightKm: h });
+                }}
+                orbitDirection={orbitDirection}
+                onSetOrbitDirection={(dir) => {
+                  setOrbitDirection(dir);
+                  handleUpdateActiveCameraBlock({ orbitDirection: dir });
+                }}
+                currentTime={currentTime}
+                activeCameraBlock={activeCameraBlock}
+                onNext={() => setCurrentStep('map')}
+              />
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* Step 6: Preview & Export */}
+            {currentStep === 'preview' && (
+              <aside className="panel w-80 h-full overflow-y-auto p-4 flex flex-col space-y-4 text-xs">
+                <div>
+                  <h2>Preview & export</h2>
+                  <p className="lede">Renders a high-bitrate video directly in your browser.</p>
+                </div>
+                <div className="group">
+                  <div className="group-title">Resolution</div>
+                  <select
+                    value={project.size}
+                    onChange={(e) =>
+                      onUpdateProject((prev) => ({
+                        ...prev,
+                        size: Number(e.target.value) as any,
+                        updatedAt: Date.now(),
+                      }))
+                    }
+                    className="field"
+                  >
+                    <option value={480}>480p</option>
+                    <option value={720}>720p HD</option>
+                    <option value={1080}>1080p Full HD (Recommended)</option>
+                    <option value={1440}>1440p 2K</option>
+                    <option value={2160}>2160p 4K</option>
+                  </select>
+                </div>
+
+                <div className="group">
+                  <div className="group-title">Frame rate</div>
+                  <select
+                    value={project.fps}
+                    onChange={(e) =>
+                      onUpdateProject((prev) => ({
+                        ...prev,
+                        fps: Number(e.target.value) as any,
+                        updatedAt: Date.now(),
+                      }))
+                    }
+                    className="field"
+                  >
+                    <option value={24}>24 fps (Cinema)</option>
+                    <option value={25}>25 fps (PAL)</option>
+                    <option value={30}>30 fps (Standard)</option>
+                    <option value={50}>50 fps (European Broadcast / PAL HD)</option>
+                    <option value={60}>60 fps (Smooth 60fps)</option>
+                  </select>
+                </div>
+
+                {/* Official FAQ feature: All scenes in one video toggle */}
+                {project.scenes.length > 1 && (
+                  <div className="group space-y-1">
+                    <div className="group-title">Multi-scene video</div>
+                    <label className="toggle">
+                      All scenes in one video
+                      <input
+                        type="checkbox"
+                        checked={renderAllScenes}
+                        onChange={(e) => setRenderAllScenes(e.target.checked)}
+                      />
+                    </label>
+                    <p className="hint">
+                      {renderAllScenes
+                        ? 'Renders all scenes sequentially into a single sequence video.'
+                        : 'Renders only the active scene.'}
+                    </p>
+                  </div>
+                )}
+
+                {/* Oct 30 changelog: Map credit on your page instead */}
+                <div className="group space-y-2">
+                  <div className="group-title">Map Credit</div>
+                  <label className="toggle">
+                    Include map credit in video
+                    <input
+                      type="checkbox"
+                      checked={project.includeMapCredit ?? true}
+                      onChange={(e) =>
+                        onUpdateProject((prev) => ({
+                          ...prev,
+                          includeMapCredit: e.target.checked,
+                          updatedAt: Date.now(),
+                        }))
+                      }
+                    />
+                  </label>
+                  <div className="p-2.5 rounded-lg bg-[var(--panel-2)] border border-[var(--border)] space-y-1.5">
+                    <div className="flex justify-between items-center text-[10px] text-[var(--muted)]">
+                      <span>Publish Attribution Credit:</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText('Map data © OpenStreetMap contributors, MapLibre');
+                          setCreditCopied(true);
+                          setTimeout(() => setCreditCopied(false), 2000);
+                        }}
+                        className="text-[var(--accent)] font-semibold hover:underline"
+                      >
+                        {creditCopied ? 'Copied!' : 'Copy credit'}
+                      </button>
+                    </div>
+                    <div className="p-1.5 bg-[var(--panel)] rounded font-mono text-[10px] text-[var(--text)] select-all border border-[var(--border)]">
+                      Map data © OpenStreetMap contributors, MapLibre
+                    </div>
+                    <p className="text-[10px] text-[var(--muted)] leading-tight">
+                      You can leave the map credit out of the video as long as you put it where you publish the video.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="next pt-2">
                   <button
                     type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText('Map data © OpenStreetMap contributors, MapLibre');
-                      setCreditCopied(true);
-                      setTimeout(() => setCreditCopied(false), 2000);
-                    }}
-                    className="text-[var(--accent)] font-semibold hover:underline"
+                    className="btn primary block"
+                    disabled={isRendering || activeScene.routes.every((r) => r.points.length === 0)}
+                    onClick={handleStartRender}
                   >
-                    {creditCopied ? 'Copied!' : 'Copy credit'}
+                    {isRendering ? 'Rendering...' : 'Render video'}
                   </button>
                 </div>
-                <div className="p-1.5 bg-[var(--panel)] rounded font-mono text-[10px] text-[var(--text)] select-all border border-[var(--border)]">
-                  Map data © OpenStreetMap contributors, MapLibre
-                </div>
-                <p className="text-[10px] text-[var(--muted)] leading-tight">
-                  You can leave the map credit out of the video as long as you put it where you publish the video.
-                </p>
-              </div>
-            </div>
+              </aside>
+            )}
 
-            <div className="next pt-2">
-              <button
-                type="button"
-                className="btn primary block"
-                disabled={isRendering || activeScene.routes.every((r) => r.points.length === 0)}
-                onClick={handleStartRender}
-              >
-                {isRendering ? 'Rendering...' : 'Render video'}
-              </button>
-            </div>
-          </aside>
+            {/* 3D Map Stage */}
+            <main ref={stageRef} className="stage flex-1 h-full relative">
+              <MapViewer
+                themeId={activeScene.mapThemeId}
+                mapLabels={mapLabels}
+                labelLang={labelLang || undefined}
+                regions={regions}
+                terrain={terrain}
+                aspect={project.aspect}
+                aspectRatio={aspectRatio}
+                size={project.size}
+                routes={activeScene.routes}
+                signs={activeScene.signs}
+                currentStep={currentStep}
+                currentTime={currentTime}
+                duration={duration}
+                overlays={activeScene.overlays}
+                cameraMode={cameraMode}
+                cameraPreset={cameraPreset}
+                followOrient={followOrient}
+                rotateOffset={rotateOffset}
+                followZoom={followZoom}
+                tilt={tilt}
+                lookAhead={lookAhead}
+                distanceKm={distanceKm}
+                heightKm={heightKm}
+                orbitDirection={orbitDirection}
+                cameraBlocks={activeScene.cameraBlocks}
+                includeMapCredit={project.includeMapCredit ?? true}
+                isPlaying={isPlaying}
+                fitRouteRequested={fitRouteRequested}
+                onUpdateRoute={handleUpdateRoute}
+                onAddPoint={handleAddPoint}
+                onAddSign={handleAddSign}
+                onUpdateSign={handleUpdateSign}
+                onMapCameraChange={handleMapCameraChange}
+              />
+            </main>
+          </>
         )}
-
-        {/* 3D Map Stage */}
-        <main ref={stageRef} className="stage flex-1 h-full relative">
-          <MapViewer
-            themeId={activeScene.mapThemeId}
-            mapLabels={mapLabels}
-            labelLang={labelLang || undefined}
-            regions={regions}
-            terrain={terrain}
-            aspect={project.aspect}
-            size={project.size}
-            routes={activeScene.routes}
-            signs={activeScene.signs}
-            currentStep={currentStep}
-            currentTime={currentTime}
-            duration={duration}
-            overlays={activeScene.overlays}
-            cameraMode={cameraMode}
-            followOrient={followOrient}
-            rotateOffset={rotateOffset}
-            followZoom={followZoom}
-            tilt={tilt}
-            lookAhead={lookAhead}
-            distanceKm={distanceKm}
-            heightKm={heightKm}
-            orbitDirection={orbitDirection}
-            cameraBlocks={activeScene.cameraBlocks}
-            includeMapCredit={project.includeMapCredit ?? true}
-            isPlaying={isPlaying}
-            fitRouteRequested={fitRouteRequested}
-            onUpdateRoute={handleUpdateRoute}
-            onAddPoint={handleAddPoint}
-            onAddSign={handleAddSign}
-            onUpdateSign={handleUpdateSign}
-            onMapCameraChange={handleMapCameraChange}
-          />
-        </main>
       </div>
 
       {/* Render Progress Scrim Dialog */}

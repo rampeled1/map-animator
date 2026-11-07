@@ -1,11 +1,12 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
-import { Route, MapSign, CameraBlock, StepId, OverlayConfig, TransportType } from '../types';
+import { Route, MapSign, CameraBlock, StepId, OverlayConfig, TransportType, CameraModePreset, AspectRatioOption } from '../types';
 import { buildMapStyle } from '../utils/mapStyleBuilder';
 import { calculateTrackStats } from '../utils/gpxParser';
 import { ThreeMapLayer } from '../utils/threeMapLayer';
 import { ModelKind3D } from '../utils/vehicle3DManager';
 import { getSmoothSnakePath } from '../utils/snakePathInterpolation';
+import { computeRouteBounds } from '../utils/cameraPresetMapper';
 
 function mapTransportTo3DModel(transport?: TransportType): ModelKind3D {
   if (!transport) return 'tank';
@@ -25,6 +26,7 @@ interface MapViewerProps {
   regions?: boolean;
   terrain?: boolean;
   aspect?: '16:9' | '9:16' | '1:1' | '4:5' | '4:3' | '21:9';
+  aspectRatio?: AspectRatioOption;
   size?: 480 | 720 | 1080 | 1440 | 2160;
   routes: Route[];
   currentStep?: StepId;
@@ -36,6 +38,7 @@ interface MapViewerProps {
   duration?: number;
   overlays?: OverlayConfig;
   cameraMode?: 'follow' | 'still' | 'orbit' | 'tripod';
+  cameraPreset?: CameraModePreset;
   followOrient?: 'north' | 'heading';
   rotateOffset?: number;
   followZoom?: number;
@@ -328,6 +331,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   regions = false,
   terrain = false,
   aspect = '16:9',
+  aspectRatio,
   size = 1080,
   routes,
   signs,
@@ -336,6 +340,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   duration,
   overlays,
   cameraMode,
+  cameraPreset,
   followOrient = 'north',
   rotateOffset = 0,
   followZoom = 8,
@@ -711,7 +716,28 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     const effectiveHeightKm = activeBlock?.heightKm ?? heightKm ?? 2.9;
     const effectiveOrbitDir = activeBlock?.orbitDirection ?? orbitDirection ?? 'clockwise';
 
+    const pts = routes[0].points;
+
     if (effectiveMode === 'still') {
+      if (cameraPreset === 'whole_tour' && pts.length > 0) {
+        const bounds = computeRouteBounds(pts);
+        if (bounds) {
+          map.fitBounds(
+            [
+              [bounds.minLng, bounds.minLat],
+              [bounds.maxLng, bounds.maxLat],
+            ],
+            {
+              padding: { top: 60, bottom: 60, left: 60, right: 60 },
+              pitch: effectivePitch !== undefined ? effectivePitch : 10,
+              bearing: 0,
+              animate: false,
+            }
+          );
+        }
+        return;
+      }
+
       if (activeBlock) {
         map.easeTo({
           center: activeBlock.center,
@@ -724,7 +750,6 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       return;
     }
 
-    const pts = routes[0].points;
     const snakeSample = getSmoothSnakePath(pts, progress);
     if (!snakeSample) return;
 
@@ -821,7 +846,18 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     routes,
     rotateOffset,
     currentStep,
+    cameraPreset,
   ]);
+
+  // Trigger map resize when aspect ratio changes
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (mapRef.current) {
+        mapRef.current.resize();
+      }
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [aspect, aspectRatio]);
 
   // Photon Place Search keyboard shortcut `/` and click outside
   useEffect(() => {

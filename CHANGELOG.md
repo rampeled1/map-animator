@@ -19,6 +19,12 @@ All notable changes to the Map Animator project are documented in this file.
   - Rebuilt camera step UI matching modern cinematic travel map studio workflows.
   - Dedicated sub-panels for **Follow** (Same direction up / Direction of travel, Zoom, Tilt, Rotate), **Still** (Tilt slider, pan to view), **Tripod** (Distance km, Height km), and **Orbit** (Clockwise/Anticlockwise, Zoom, Tilt).
   - Timeline keyframe block slicing with playhead `+` button and `'N'` keyboard shortcut, plus block deletion `×`.
+- **Studio-Grade 2-Column Camera Tab (v2.4)**:
+  - Added two-column studio layout: Left 60% Cinematic Live Preview with aspect-ratio responsive viewport, resolution badge, and dedicated playback timeline; Right 40% Configuration Panel.
+  - Three simplified presets: **Fly Along** (cinematic travel direction chase), **Follow (North Up)**, and **Whole Tour** (automatic route bounding-box overview framing via `map.fitBounds()`).
+  - Format selector: **Landscape (16:9)**, **Vertical (9:16 Reels/Shorts)**, and **Square (1:1)** with dynamic container reflow and `map.resize()`.
+  - Duration selector with proportional trajectory speed scaling: **Short (20s)**, **Normal (40s)**, **Long (60s)**, and **Custom (5–300s)**.
+  - Added `cameraPresetMapper.ts` and comprehensive system design document (`DESIGN.md`).
 - **Non-Destructive Undo/Redo Engine**:
   - Global `⌘Z` / `Ctrl+Z` (and `⌘⇧Z` / `Ctrl+Y`) action history stack rewinding full project mutations (routes, points, cameras, signs, settings).
 

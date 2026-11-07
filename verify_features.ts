@@ -3,6 +3,8 @@ import { ALL_MAP_THEMES } from './src/utils/mapStyleBuilder.ts';
 import { calculateTrackStats, generateDayEndSigns, haversineDistance } from './src/utils/gpxParser.ts';
 import { resampleRouteByDistance } from './src/utils/roadRouter.ts';
 import type { RoutePoint } from './src/types/index.ts';
+import { mapPresetToCameraBlocks, computeRouteBounds } from './src/utils/cameraPresetMapper.ts';
+import { migrateProjectDefaults } from './src/utils/projectStorage.ts';
 
 console.log('=== MAP ANIMATOR COMPREHENSIVE VERIFICATION ===\n');
 
@@ -118,6 +120,33 @@ assert(resampled01Km.length >= 90 && resampled01Km.length <= 110, `Resampled eve
 
 const resampled20Km = resampleRouteByDistance(route10Km, 20.0);
 assert(resampled20Km.length === 1, `Resampled every 20.0 km on a 10km route keeps destination point (got ${resampled20Km.length})`);
+
+// 8. Verify Camera Presets & Studio Pipeline (v2.4)
+console.log('\n8. Checking Camera Presets & Studio Pipeline:');
+const samplePts: RoutePoint[] = [
+  { lng: 10.0, lat: 45.0, ele: 100 },
+  { lng: 10.5, lat: 45.5, ele: 200 },
+  { lng: 11.0, lat: 46.0, ele: 300 },
+];
+
+const flyBlocks = mapPresetToCameraBlocks('fly_along', samplePts);
+assert(flyBlocks.length === 1, 'fly_along generates 1 CameraBlock');
+assert(flyBlocks[0].kind === 'follow' && flyBlocks[0].followOrient === 'heading', 'fly_along maps to follow + heading');
+assert(flyBlocks[0].pitch === 55 && flyBlocks[0].zoom === 15, 'fly_along defaults to pitch 55° and zoom 15');
+
+const northBlocks = mapPresetToCameraBlocks('follow_north_up', samplePts);
+assert(northBlocks[0].kind === 'follow' && northBlocks[0].followOrient === 'north', 'follow_north_up maps to follow + north');
+assert(northBlocks[0].pitch === 35 && northBlocks[0].bearing === 0, 'follow_north_up defaults to pitch 35° and bearing 0°');
+
+const tourBlocks = mapPresetToCameraBlocks('whole_tour', samplePts);
+assert(tourBlocks[0].kind === 'still', 'whole_tour maps to still mode');
+const bounds = computeRouteBounds(samplePts);
+assert(bounds !== null && bounds.minLng === 10.0 && bounds.maxLng === 11.0, 'Route bounds correctly computed for whole_tour');
+
+const migrated = migrateProjectDefaults({});
+assert(migrated.cameraPreset === 'fly_along', 'Migrated project defaults to fly_along preset');
+assert(migrated.aspectRatio === '16:9', 'Migrated project defaults to 16:9 aspect ratio');
+assert(migrated.durationPreset === 40, 'Migrated project defaults to 40s duration preset');
 
 console.log(`\n========================================`);
 console.log(`RESULTS: ${passedTests} / ${totalTests} tests passed successfully.`);
