@@ -1,6 +1,6 @@
 # Map Animator: System Architecture & Technical Design Document
 
-**Version:** 2.4.0  
+**Version:** 3.0.0 (UX Simplification + Studio Camera v2.4)  
 **Status:** Approved Architecture  
 **Application:** [Map Animator](file:///Users/rampeled/developer/map-animator) (`/Users/rampeled/developer/map-animator`)  
 **Primary Stack:** React 18, TypeScript, MapLibre GL JS, Three.js (WebGL Custom Layer), OSRM Geodesic Engine, MediaStream Recording API  
@@ -84,6 +84,24 @@ flowchart TD
     Geo_Engine --> Render_Engine
     Render_Engine --> Export_Engine
 ```
+
+### 2.1. Two-Tier UX Simplification Architecture (v3.0 Progressive Disclosure)
+
+To satisfy the core design principle — *"A 12-year-old should be able to open it, create a journey and make a video without reading instructions"* — while retaining 100% of the pro-level capabilities, the UI layer implements a **Two-Tier Progressive Disclosure Architecture** controlled by `project.uiMode` (`'simple' | 'advanced'`):
+
+1. **Simple Mode (Default — *"Make a travel video"*)**:
+   - Presents **8 guided, single-question steps** in the top navigation bar:
+     1. **`1. Route` (`route`)**: *"Where are we going?"* — Simple Journey Builder with autocomplete (`searchPlaceSuggestions` with Photon API + instant local city lookup including `Baku, Azerbaijan` and `Laza, Azerbaijan`), `+ Add another stop`, 6 big transport cards (`Car`, `Walk`, `Plane`, `Bike`, `Train`, `Boat`), and a primary `Create my route →` button (`buildJourneyFromStops`) that automatically computes either a 100m OSRM road route or a 3D geodesic flight arc.
+     2. **`2. Camera` (`camera`)**: *"How should the camera follow us?"* — 2-column Studio layout featuring 3 visual camera movement cards (`Fly Along`, `Follow North Up`, `Whole Tour`), format toggles (`16:9`, `9:16`, `1:1`), and duration pills (`20s`, `40s`, `60s`, `Custom`) mapped via [`cameraPresetMapper.ts`](file:///Users/rampeled/developer/map-animator/src/utils/cameraPresetMapper.ts).
+     3. **`3. Map` (`map`)**: *"What should the map look like?"* — Visual theme swatches, simple toggles for Place names, Country borders, and 3D mountains, plus `Next: Line →`.
+     4. **`4. Line` (`line`)**: *"How should our journey look?"* — 8 high-contrast route color swatches, thickness pills (`Thin`, `Normal`, `Bold`), pattern pills (`Solid`, `Dashed`, `Dotted`), vehicle size (`Small`, `Normal`, `Large`), and `Next: Title →`.
+     5. **`5. Title` (`title`)**: *"What is the video called?"* — Video Title & Subtitle inputs with 4 visual card styles (`Cinema`, `Modern`, `Postcard`, `Bold`) and `Next: Photos →`.
+     6. **`6. Photos` (`signs`)**: *"Which photos should we show?"* — Drag-and-drop photo uploader with automatic EXIF GPS placement, pin sign creators, and `Next: Info →`.
+     7. **`7. Info` (`overlays`)**: *"What information should appear?"* — Visual toggle cards for `Distance`, `Speed`, `Height / Altitude`, `Hill Graph`, `Compass`, and `km / miles` units, plus `Next: Video →`.
+     8. **`8. Video` (`preview`)**: *"Create my video!"* — Clean summary card (Format, Duration, Distance) and a single prominent `🎬 Create my video!` export button.
+2. **Advanced Mode (Optional — *"Take full control"*)**:
+   - Accessible at any time via the top-bar `✨ Simple` / `⚙️ Advanced` switch or per-panel expandable drawers (`▾ Advanced route & GPX tools`, `▾ Advanced camera controls`, `▾ Advanced map settings`).
+   - Exposes GPX/KML multi-track import, point spacing (`0.1–20 km`), 59 transport vehicles (including military), 4-mode camera keyframe block splitting (`N` key), pitch/bearing/zoom/FOV sliders, custom color pickers, multi-scene sequencing, and 480p–4K / 24–60 FPS export controls.
 
 ---
 
@@ -341,26 +359,27 @@ export interface MapProject {
 /Users/rampeled/developer/map-animator/
 ├── src/
 │   ├── components/
-│   │   ├── CameraEditorPanel.tsx    # 4-Mode Camera Inspector (Follow, Still, Tripod, Orbit)
-│   │   ├── RouteEditorPanel.tsx     # Route plotting, OSRM mode toggles, vehicle picker
-│   │   ├── MapViewer.tsx            # MapLibre GL instance & ThreeMapLayer host
-│   │   ├── EditorPage.tsx           # Main workspace, timeline bar, undo/redo manager
-│   │   ├── ElevationProfileChart.tsx# Dynamic elevation telemetry HUD
-│   │   ├── OverlaysEditorPanel.tsx  # Aspect ratio, watermark, speed gauge toggles
-│   │   ├── SignsEditorPanel.tsx     # 3D signpost markers & label annotations
+│   │   ├── CameraEditorPanel.tsx    # Studio Camera v2.4 (2-col presets + Advanced 4-Mode Inspector)
+│   │   ├── RouteEditorPanel.tsx     # Simple Journey Builder ("Where are we going?") + Advanced GPX/OSRM
+│   │   ├── MapViewer.tsx            # MapLibre GL instance, aspect-ratio frame & ThreeMapLayer host
+│   │   ├── EditorPage.tsx           # 8-Step Simple/Advanced workspace, Line & Video panels, Undo/Redo
+│   │   ├── ElevationProfileChart.tsx# Dynamic elevation telemetry HUD ("Hill Graph")
+│   │   ├── OverlaysEditorPanel.tsx  # Dual-mode panel: Step 5 (Title) & Step 7 (Info cards)
+│   │   ├── SignsEditorPanel.tsx     # Step 6 (Photos): EXIF GPS photo dropzone & 3D signposts
 │   │   └── HomePage.tsx             # Project dashboard & templates
 │   ├── types/
-│   │   └── index.ts                 # TypeScript interfaces for routes, camera, projects
+│   │   └── index.ts                 # TypeScript interfaces (StepId, UIMode, CameraPresetId, MapProject)
 │   ├── utils/
+│   │   ├── cameraPresetMapper.ts    # Maps Fly Along / Follow North Up / Whole Tour to CameraBlocks
 │   │   ├── threeMapLayer.ts         # Three.js Custom WebGL Layer for MapLibre
 │   │   ├── snakePathInterpolation.ts# Arc-length continuous trajectory engine
 │   │   ├── catmullRom3DPath.ts      # 3D Catmull-Rom spline calculations & ribbon mesh
-│   │   ├── roadRouter.ts            # OSRM road routing & 0.1km geodesic densification
+│   │   ├── roadRouter.ts            # Place autocomplete, buildJourneyFromStops & OSRM 0.1km router
 │   │   ├── vehicle3DManager.ts      # PBR procedural 3D models (tank, car, fighter, drone)
 │   │   ├── videoRecorder.ts         # High-definition WebM/MP4 canvas recorder
 │   │   ├── gpxParser.ts             # GPX / KML GPS file importer
 │   │   ├── mapStyleBuilder.ts       # OpenStreetMap & vector tile style definitions
-│   │   └── projectStorage.ts        # Local project serialization & persistence
+│   │   └── projectStorage.ts        # Local project serialization, migration & persistence
 │   ├── App.tsx                      # Application root & routing
 │   └── main.tsx                     # React 18 DOM mount
 ```
@@ -370,10 +389,11 @@ export interface MapProject {
 ## 6. Verification, Testing & Quality Assurance
 
 To guarantee system stability and visual performance:
-- **Kinematics Test Suite**: [`verify_features.ts`](file:///Users/rampeled/developer/map-animator/verify_features.ts) runs 53 automated tests asserting:
+- **Kinematics & UX Test Suite**: [`verify_features.ts`](file:///Users/rampeled/developer/map-animator/verify_features.ts) runs 67 automated tests asserting:
   * Spline continuity $C^1$ at all road junction boundaries.
   * Geodesic densification spacing $\le 100\,\text{m}$ across tight corners.
-  * Camera block boundaries covering $[0, T_{\text{total}}]$ without timeline gaps.
+  * Camera preset mapping (`fly_along`, `follow_north_up`, `whole_tour`) and timeline block coverage $[0, T_{\text{total}}]$.
+  * Simple Journey Builder place autocomplete (`Baku, Azerbaijan`, `Laza, Azerbaijan`) and automatic flight arc / road generation (`buildJourneyFromStops`).
   * Undo / Redo state preservation across 50 consecutive mutations.
 - **Production Build Integrity**: Verified with `npm run build` with 0 TypeScript diagnostics and clean Vite chunk bundling.
 - **Local Dev Server**: Actively served on port 3000 (`http://localhost:3000/`).

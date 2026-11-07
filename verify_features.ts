@@ -1,7 +1,7 @@
 import { ALL_TRANSPORTS, TRANSPORT_CATEGORIES } from './src/constants/transports.ts';
 import { ALL_MAP_THEMES } from './src/utils/mapStyleBuilder.ts';
 import { calculateTrackStats, generateDayEndSigns, haversineDistance } from './src/utils/gpxParser.ts';
-import { resampleRouteByDistance } from './src/utils/roadRouter.ts';
+import { resampleRouteByDistance, searchPlaceSuggestions, buildJourneyFromStops } from './src/utils/roadRouter.ts';
 import type { RoutePoint } from './src/types/index.ts';
 import { mapPresetToCameraBlocks, computeRouteBounds } from './src/utils/cameraPresetMapper.ts';
 import { migrateProjectDefaults } from './src/utils/projectStorage.ts';
@@ -148,6 +148,27 @@ assert(migrated.cameraPreset === 'fly_along', 'Migrated project defaults to fly_
 assert(migrated.aspectRatio === '16:9', 'Migrated project defaults to 16:9 aspect ratio');
 assert(migrated.durationPreset === 40, 'Migrated project defaults to 40s duration preset');
 
-console.log(`\n========================================`);
-console.log(`RESULTS: ${passedTests} / ${totalTests} tests passed successfully.`);
-console.log(`========================================\n`);
+// 9. Verify UX Simplification v3.0 (Simple Journey Builder & Place Suggestions)
+console.log('\n9. Checking UX Simplification v3.0 (Simple Journey Builder & Autocomplete):');
+(async () => {
+  const bakuSuggestions = await searchPlaceSuggestions('Baku');
+  assert(bakuSuggestions.length > 0 && bakuSuggestions[0].fullName.includes('Baku'), `Found place suggestion for Baku: "${bakuSuggestions[0]?.fullName}"`);
+
+  const lazaSuggestions = await searchPlaceSuggestions('Laza');
+  assert(lazaSuggestions.length > 0 && lazaSuggestions[0].fullName.includes('Laza'), `Found place suggestion for Laza: "${lazaSuggestions[0]?.fullName}"`);
+
+  // Verify plane journey arc generation (synchronous offline-safe geodesic arc)
+  const planePts = await buildJourneyFromStops(
+    [
+      { lng: 49.8671, lat: 40.4093 },
+      { lng: 48.1156, lat: 41.2969 },
+    ],
+    'plane'
+  );
+  assert(planePts.length >= 40, `Plane journey generates smooth flight arc (${planePts.length} points)`);
+  assert((planePts[Math.floor(planePts.length / 2)].ele ?? 0) > 100, 'Plane journey arc includes cruise altitude apex');
+
+  console.log(`\n========================================`);
+  console.log(`RESULTS: ${passedTests} / ${totalTests} tests passed successfully.`);
+  console.log(`========================================\n`);
+})();

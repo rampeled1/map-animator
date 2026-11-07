@@ -1,4 +1,5 @@
-export type StepId = 'route' | 'map' | 'signs' | 'overlays' | 'camera' | 'preview';
+export type StepId = 'route' | 'camera' | 'map' | 'line' | 'title' | 'signs' | 'overlays' | 'preview';
+export type UIMode = 'simple' | 'advanced';
 
 export type TransportType =
   | 'motorcycle'
@@ -193,6 +194,7 @@ export interface MapProject {
   name: string;
   createdAt: number;
   updatedAt: number;
+  uiMode?: UIMode; // 'simple' (default) or 'advanced'
   aspect: '16:9' | '9:16' | '1:1' | '4:5' | '4:3' | '21:9';
   aspectRatio?: AspectRatioOption; // NEW — studio camera format
   duration?: number; // Overall project duration in seconds

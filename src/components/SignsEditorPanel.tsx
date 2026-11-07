@@ -24,6 +24,7 @@ interface SignsEditorPanelProps {
   onDeleteSign: (id: string) => void;
   onReorderSigns?: (signs: MapSign[]) => void;
   onSelectSign?: (id: string) => void;
+  onNext?: () => void;
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {
@@ -42,6 +43,7 @@ export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
   onUpdateSign,
   onDeleteSign,
   onReorderSigns,
+  onNext,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [draggedIdx, setDraggedIdx] = useState<number | null>(null);
@@ -111,11 +113,16 @@ export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
   };
 
   return (
-    <aside className="panel w-80 h-full overflow-y-auto p-4 flex flex-col space-y-4 text-xs">
+    <aside className="panel w-85 h-full overflow-y-auto p-5 flex flex-col space-y-4 text-xs bg-[#0f172a] border-r border-slate-800 text-slate-100">
       <div>
-        <h2>3. Add Signs & Photos</h2>
-        <p className="lede">
-          Add map pins, camp sites, finish arches, or drop photos from your phone. Photos with GPS are positioned automatically.
+        <span className="text-[11px] font-bold tracking-wider text-teal-400 uppercase">
+          STEP 6 · PHOTOS
+        </span>
+        <h2 className="text-2xl font-extrabold text-slate-100 mt-1 mb-1 tracking-tight">
+          Which photos should we show?
+        </h2>
+        <p className="text-xs text-slate-400 leading-relaxed">
+          Drop photos from your phone or add pins along your journey.
         </p>
       </div>
 
@@ -327,6 +334,19 @@ export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
           ))
         )}
       </div>
+
+      {onNext && (
+        <div className="pt-4 mt-auto border-t border-slate-800 flex justify-end">
+          <button
+            type="button"
+            onClick={onNext}
+            className="px-6 py-2.5 rounded-xl bg-teal-500 hover:bg-teal-400 text-slate-950 font-bold text-sm shadow-lg shadow-teal-500/20 transition-all flex items-center space-x-2 cursor-pointer"
+          >
+            <span>Next: Info</span>
+            <span>→</span>
+          </button>
+        </div>
+      )}
     </aside>
   );
 };

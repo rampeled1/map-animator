@@ -16,7 +16,6 @@ import {
   PRIMARY_THEMES,
   MORE_THEMES_LIST,
   LABEL_LANGUAGES,
-  getThemeInfo,
 } from '../constants/themes';
 
 interface EditorPageProps {
@@ -264,13 +263,25 @@ export const EditorPage: React.FC<EditorPageProps> = ({
     return () => cancelAnimationFrame(frameId);
   }, [isPlaying, duration, playbackSpeed, isRendering, renderAllScenes, activeSceneIndex, project.scenes.length]);
 
+  const uiMode = project.uiMode || 'simple';
+  const activeRoute = activeScene.routes.find((r) => r.id === activeRouteId) || activeScene.routes[0];
+  const handleSetUIMode = (mode: 'simple' | 'advanced') => {
+    onUpdateProject((prev) => ({
+      ...prev,
+      uiMode: mode,
+      updatedAt: Date.now(),
+    }));
+  };
+
   const steps: { id: StepId; label: string; num: number }[] = [
     { id: 'route', label: 'Route', num: 1 },
     { id: 'camera', label: 'Camera', num: 2 },
     { id: 'map', label: 'Map', num: 3 },
-    { id: 'signs', label: 'Signs', num: 4 },
-    { id: 'overlays', label: 'Overlays', num: 5 },
-    { id: 'preview', label: 'Preview & export', num: 6 },
+    { id: 'line', label: 'Line', num: 4 },
+    { id: 'title', label: 'Title', num: 5 },
+    { id: 'signs', label: 'Photos', num: 6 },
+    { id: 'overlays', label: 'Info', num: 7 },
+    { id: 'preview', label: 'Video', num: 8 },
   ];
 
   const updateActiveScene = (patch: Partial<typeof activeScene>) => {
@@ -721,6 +732,34 @@ export const EditorPage: React.FC<EditorPageProps> = ({
         </div>
 
         <div className="stepbar-right flex items-center space-x-3">
+          {/* Simple Mode vs Advanced Mode Toggle */}
+          <div className="flex items-center bg-[#0f172a] border border-slate-700 rounded-lg p-0.5 text-[11px]">
+            <button
+              type="button"
+              onClick={() => handleSetUIMode('simple')}
+              className={`px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer ${
+                uiMode === 'simple'
+                  ? 'bg-teal-500 text-slate-950 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Simple Mode: Easy travel video maker"
+            >
+              ✨ Simple
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSetUIMode('advanced')}
+              className={`px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer ${
+                uiMode === 'advanced'
+                  ? 'bg-teal-500 text-slate-950 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Advanced Mode: Full camera, route, map and rendering controls"
+            >
+              ⚙️ Advanced
+            </button>
+          </div>
+
           <button
             type="button"
             onClick={() => setHelpOpen(true)}
@@ -739,6 +778,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                 onUpdateProject((prev) => ({
                   ...prev,
                   aspect: e.target.value as any,
+                  aspectRatio: e.target.value as any,
                   updatedAt: Date.now(),
                 }))
               }
@@ -756,11 +796,12 @@ export const EditorPage: React.FC<EditorPageProps> = ({
 
       {/* 3. Main Workspace */}
       <div className="workspace-wrap flex-1 flex relative overflow-hidden">
-        {/* Step 1: Route */}
+        {/* Step 1: Route ("Where are we going?") */}
         {currentStep === 'route' && (
           <RouteEditorPanel
             routes={activeScene.routes}
             activeRouteId={activeRouteId}
+            uiMode={uiMode}
             snapProfile={snapProfile}
             onSetSnapProfile={setSnapProfile}
             routingInterval={routingInterval}
@@ -772,25 +813,27 @@ export const EditorPage: React.FC<EditorPageProps> = ({
             onUpdateRoute={handleUpdateRoute}
             onDeleteRoute={handleDeleteRoute}
             onImportGPX={(file, opts) => onImportGPX(file, opts, activeSceneIndex)}
+            onNext={() => setCurrentStep('camera')}
           />
         )}
 
-        {/* Step 2: Map */}
+        {/* Step 3: Map ("What should the map look like?") */}
         {currentStep === 'map' && (
-          <aside className="panel">
+          <aside className="panel w-85 h-full overflow-y-auto p-5 flex flex-col space-y-5 text-xs bg-[#0f172a] border-r border-slate-800 text-slate-100">
             <div>
-              <h2>Choose the map</h2>
-              <p className="lede">
-                The map under your routes. The routes’ lines and symbols are styled in the Route
-                step.
-              </p>
-              <p className="scene-note">
-                For this scene. A new scene copies the map of the last scene.
+              <span className="text-[11px] font-bold tracking-wider text-teal-400 uppercase">
+                STEP 3 · MAP
+              </span>
+              <h2 className="text-2xl font-extrabold text-slate-100 mt-1 mb-1 tracking-tight">
+                What should the map look like?
+              </h2>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Pick a map style for your travel video.
               </p>
             </div>
 
             <div className="group">
-              <div className="group-title">Map theme</div>
+              <div className="group-title">MAP STYLE</div>
               <div className="themes" role="radiogroup" aria-label="Map theme">
                 {PRIMARY_THEMES.map((theme) => (
                   <button
@@ -827,23 +870,10 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                   <span>More</span>
                 </button>
               </div>
-
-              <p className="hint">
-                {selectedExtraTheme && <b>{selectedExtraTheme.name}: </b>}
-                {getThemeInfo(activeScene.mapThemeId)?.note}
-                {selectedExtraTheme && (
-                  <>
-                    {' '}
-                    <button className="link-btn" onClick={() => setMoreThemesOpen(true)}>
-                      More themes
-                    </button>
-                  </>
-                )}
-              </p>
             </div>
 
             <div className="group">
-              <div className="group-title">On the map</div>
+              <div className="group-title">MAP DETAILS</div>
               <label className="toggle">
                 Place names
                 <input
@@ -853,7 +883,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                 />
               </label>
 
-              {(mapLabels || regions) && (
+              {uiMode === 'advanced' && (mapLabels || regions) && (
                 <label className="toggle">
                   Names in
                   <select
@@ -873,7 +903,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
               )}
 
               <label className="toggle">
-                States and regions
+                Country & state borders
                 <input
                   type="checkbox"
                   checked={regions}
@@ -889,27 +919,185 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                   onChange={(e) => updateActiveScene({ terrain: e.target.checked })}
                 />
               </label>
-
-              {terrain && (
-                <p className="hint">
-                  Mountains rise and get shaded slopes. Tilt the camera in the Camera step to see
-                  them in 3D. Renders take a little longer.
-                </p>
-              )}
             </div>
 
-            <div className="next">
+            <div className="pt-4 mt-auto border-t border-slate-800 flex justify-end">
               <button
-                className="btn primary block"
-                onClick={() => setCurrentStep('signs')}
+                type="button"
+                onClick={() => setCurrentStep('line')}
+                className="px-6 py-2.5 rounded-xl bg-teal-500 hover:bg-teal-400 text-slate-950 font-bold text-sm shadow-lg shadow-teal-500/20 transition-all flex items-center space-x-2 cursor-pointer"
               >
-                Next: add signs →
+                <span>Next: Line</span>
+                <span>→</span>
               </button>
             </div>
           </aside>
         )}
 
-        {/* Step 3: Signs */}
+        {/* Step 4: Line ("How should our journey look?") */}
+        {currentStep === 'line' && activeRoute && (
+          <aside className="panel w-85 h-full overflow-y-auto p-5 flex flex-col space-y-5 text-xs bg-[#0f172a] border-r border-slate-800 text-slate-100">
+            <div>
+              <span className="text-[11px] font-bold tracking-wider text-teal-400 uppercase">
+                STEP 4 · LINE
+              </span>
+              <h2 className="text-2xl font-extrabold text-slate-100 mt-1 mb-1 tracking-tight">
+                How should our journey look?
+              </h2>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Pick the color, thickness, and size of your route line and vehicle.
+              </p>
+            </div>
+
+            {/* Color Swatches */}
+            <div className="space-y-2.5">
+              <span className="text-[11px] font-bold text-teal-400 tracking-wider uppercase block">
+                LINE COLOR ?
+              </span>
+              <div className="grid grid-cols-4 gap-2.5">
+                {[
+                  { color: '#ff4d2e', name: 'Sunset Red' },
+                  { color: '#ff9800', name: 'Amber' },
+                  { color: '#14b8a6', name: 'Teal' },
+                  { color: '#2196f3', name: 'Ocean Blue' },
+                  { color: '#ffd600', name: 'Gold' },
+                  { color: '#4caf50', name: 'Forest' },
+                  { color: '#9c27b0', name: 'Purple' },
+                  { color: '#ffffff', name: 'Snow White' },
+                ].map((item) => {
+                  const isSelected = activeRoute.color === item.color;
+                  return (
+                    <button
+                      key={item.color}
+                      type="button"
+                      onClick={() => handleUpdateRoute({ ...activeRoute, color: item.color })}
+                      className={`p-2.5 rounded-xl border flex flex-col items-center space-y-1.5 transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-teal-500/15 border-teal-500 ring-2 ring-teal-500'
+                          : 'bg-[#1e293b] border-slate-700 hover:border-teal-400'
+                      }`}
+                    >
+                      <span
+                        className="w-6 h-6 rounded-full border border-black/30 shadow-inner"
+                        style={{ backgroundColor: item.color }}
+                      />
+                      <span className="text-[10px] font-medium text-slate-300">{item.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Line Thickness */}
+            <div className="space-y-2.5">
+              <span className="text-[11px] font-bold text-teal-400 tracking-wider uppercase block">
+                LINE THICKNESS ?
+              </span>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { width: 3, label: 'Thin' },
+                  { width: 6, label: 'Normal' },
+                  { width: 10, label: 'Bold' },
+                ].map((opt) => (
+                  <button
+                    key={opt.label}
+                    type="button"
+                    onClick={() => handleUpdateRoute({ ...activeRoute, width: opt.width })}
+                    className={`p-3 rounded-xl border text-center transition-all cursor-pointer ${
+                      activeRoute.width === opt.width
+                        ? 'bg-teal-500/15 border-teal-500 ring-2 ring-teal-500 text-teal-400 font-bold'
+                        : 'bg-[#1e293b] border-slate-700 text-slate-200 hover:border-teal-400'
+                    }`}
+                  >
+                    <div
+                      className="w-full rounded-full mx-auto mb-2"
+                      style={{
+                        height: `${opt.width}px`,
+                        backgroundColor: activeRoute.color || '#ff4d2e',
+                      }}
+                    />
+                    <span className="text-xs">{opt.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Line Pattern */}
+            <div className="space-y-2.5">
+              <span className="text-[11px] font-bold text-teal-400 tracking-wider uppercase block">
+                LINE PATTERN ?
+              </span>
+              <div className="grid grid-cols-3 gap-2">
+                {(['solid', 'dashed', 'dotted'] as const).map((style) => (
+                  <button
+                    key={style}
+                    type="button"
+                    onClick={() => handleUpdateRoute({ ...activeRoute, style })}
+                    className={`p-2.5 rounded-xl border text-center capitalize font-semibold transition-all cursor-pointer ${
+                      (activeRoute.style || 'solid') === style
+                        ? 'bg-teal-500/15 border-teal-500 ring-2 ring-teal-500 text-teal-400'
+                        : 'bg-[#1e293b] border-slate-700 text-slate-300 hover:border-teal-400'
+                    }`}
+                  >
+                    {style}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Vehicle Size */}
+            <div className="space-y-2.5">
+              <span className="text-[11px] font-bold text-teal-400 tracking-wider uppercase block">
+                VEHICLE SIZE ?
+              </span>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { scale: 0.8, label: 'Small' },
+                  { scale: 1.0, label: 'Normal' },
+                  { scale: 1.4, label: 'Large' },
+                ].map((sz) => (
+                  <button
+                    key={sz.label}
+                    type="button"
+                    onClick={() =>
+                      handleUpdateRoute({ ...activeRoute, symbolScale: sz.scale })
+                    }
+                    className={`p-2.5 rounded-xl border text-center font-semibold transition-all cursor-pointer ${
+                      (activeRoute.symbolScale || 1.0) === sz.scale
+                        ? 'bg-teal-500/15 border-teal-500 ring-2 ring-teal-500 text-teal-400'
+                        : 'bg-[#1e293b] border-slate-700 text-slate-300 hover:border-teal-400'
+                    }`}
+                  >
+                    {sz.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="pt-4 mt-auto border-t border-slate-800 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setCurrentStep('title')}
+                className="px-6 py-2.5 rounded-xl bg-teal-500 hover:bg-teal-400 text-slate-950 font-bold text-sm shadow-lg shadow-teal-500/20 transition-all flex items-center space-x-2 cursor-pointer"
+              >
+                <span>Next: Title</span>
+                <span>→</span>
+              </button>
+            </div>
+          </aside>
+        )}
+
+        {/* Step 5: Title ("What is the video called?") */}
+        {currentStep === 'title' && (
+          <OverlaysEditorPanel
+            overlays={activeScene.overlays}
+            mode="title"
+            onUpdateOverlays={handleUpdateOverlays}
+            onNext={() => setCurrentStep('signs')}
+          />
+        )}
+
+        {/* Step 6: Photos ("Which photos should we show?") */}
         {currentStep === 'signs' && (
           <SignsEditorPanel
             signs={activeScene.signs}
@@ -925,14 +1113,17 @@ export const EditorPage: React.FC<EditorPageProps> = ({
             onUpdateSign={handleUpdateSign}
             onDeleteSign={handleDeleteSign}
             onReorderSigns={handleReorderSigns}
+            onNext={() => setCurrentStep('overlays')}
           />
         )}
 
-        {/* Step 4: Overlays */}
+        {/* Step 7: Info ("What information should appear?") */}
         {currentStep === 'overlays' && (
           <OverlaysEditorPanel
             overlays={activeScene.overlays}
+            mode="info"
             onUpdateOverlays={handleUpdateOverlays}
+            onNext={() => setCurrentStep('preview')}
           />
         )}
 
@@ -1087,126 +1278,148 @@ export const EditorPage: React.FC<EditorPageProps> = ({
           </div>
         ) : (
           <>
-            {/* Step 6: Preview & Export */}
+            {/* Step 8: Video ("Create my video!") */}
             {currentStep === 'preview' && (
-              <aside className="panel w-80 h-full overflow-y-auto p-4 flex flex-col space-y-4 text-xs">
+              <aside className="panel w-85 h-full overflow-y-auto p-5 flex flex-col space-y-5 text-xs bg-[#0f172a] border-r border-slate-800 text-slate-100">
                 <div>
-                  <h2>Preview & export</h2>
-                  <p className="lede">Renders a high-bitrate video directly in your browser.</p>
-                </div>
-                <div className="group">
-                  <div className="group-title">Resolution</div>
-                  <select
-                    value={project.size}
-                    onChange={(e) =>
-                      onUpdateProject((prev) => ({
-                        ...prev,
-                        size: Number(e.target.value) as any,
-                        updatedAt: Date.now(),
-                      }))
-                    }
-                    className="field"
-                  >
-                    <option value={480}>480p</option>
-                    <option value={720}>720p HD</option>
-                    <option value={1080}>1080p Full HD (Recommended)</option>
-                    <option value={1440}>1440p 2K</option>
-                    <option value={2160}>2160p 4K</option>
-                  </select>
+                  <span className="text-[11px] font-bold tracking-wider text-teal-400 uppercase">
+                    STEP 8 · VIDEO
+                  </span>
+                  <h2 className="text-2xl font-extrabold text-slate-100 mt-1 mb-1 tracking-tight">
+                    Create my video!
+                  </h2>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Your journey is ready! Press the button below to record and download your travel video.
+                  </p>
                 </div>
 
-                <div className="group">
-                  <div className="group-title">Frame rate</div>
-                  <select
-                    value={project.fps}
-                    onChange={(e) =>
-                      onUpdateProject((prev) => ({
-                        ...prev,
-                        fps: Number(e.target.value) as any,
-                        updatedAt: Date.now(),
-                      }))
-                    }
-                    className="field"
-                  >
-                    <option value={24}>24 fps (Cinema)</option>
-                    <option value={25}>25 fps (PAL)</option>
-                    <option value={30}>30 fps (Standard)</option>
-                    <option value={50}>50 fps (European Broadcast / PAL HD)</option>
-                    <option value={60}>60 fps (Smooth 60fps)</option>
-                  </select>
+                {/* Simple Summary Card */}
+                <div className="p-4 rounded-xl bg-[#1e293b]/80 border border-slate-700/80 space-y-2.5">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Video Format</span>
+                    <span className="font-mono font-bold text-teal-400">{aspectRatio}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Video Length</span>
+                    <span className="font-mono font-bold text-slate-200">{duration} seconds</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Quality</span>
+                    <span className="font-mono font-bold text-slate-200">
+                      {project.size}p · {project.fps} fps
+                    </span>
+                  </div>
                 </div>
 
-                {/* Official FAQ feature: All scenes in one video toggle */}
-                {project.scenes.length > 1 && (
-                  <div className="group space-y-1">
-                    <div className="group-title">Multi-scene video</div>
-                    <label className="toggle">
-                      All scenes in one video
-                      <input
-                        type="checkbox"
-                        checked={renderAllScenes}
-                        onChange={(e) => setRenderAllScenes(e.target.checked)}
-                      />
-                    </label>
-                    <p className="hint">
-                      {renderAllScenes
-                        ? 'Renders all scenes sequentially into a single sequence video.'
-                        : 'Renders only the active scene.'}
-                    </p>
+                {/* Primary Create My Video CTA */}
+                <button
+                  type="button"
+                  disabled={isRendering || activeScene.routes.every((r) => r.points.length === 0)}
+                  onClick={handleStartRender}
+                  className="w-full py-3.5 px-5 rounded-xl bg-teal-500 hover:bg-teal-400 disabled:opacity-50 text-slate-950 font-extrabold text-sm shadow-xl shadow-teal-500/25 transition-all flex items-center justify-center space-x-2 cursor-pointer"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>{isRendering ? 'Creating video...' : 'Create my video!'}</span>
+                </button>
+
+                {uiMode === 'advanced' && (
+                  <div className="space-y-4 pt-3 border-t border-slate-800">
+                    <div className="group">
+                      <div className="group-title">Resolution</div>
+                      <select
+                        value={project.size}
+                        onChange={(e) =>
+                          onUpdateProject((prev) => ({
+                            ...prev,
+                            size: Number(e.target.value) as any,
+                            updatedAt: Date.now(),
+                          }))
+                        }
+                        className="field"
+                      >
+                        <option value={480}>480p</option>
+                        <option value={720}>720p HD</option>
+                        <option value={1080}>1080p Full HD (Recommended)</option>
+                        <option value={1440}>1440p 2K</option>
+                        <option value={2160}>2160p 4K</option>
+                      </select>
+                    </div>
+
+                    <div className="group">
+                      <div className="group-title">Frame rate</div>
+                      <select
+                        value={project.fps}
+                        onChange={(e) =>
+                          onUpdateProject((prev) => ({
+                            ...prev,
+                            fps: Number(e.target.value) as any,
+                            updatedAt: Date.now(),
+                          }))
+                        }
+                        className="field"
+                      >
+                        <option value={24}>24 fps (Cinema)</option>
+                        <option value={25}>25 fps (PAL)</option>
+                        <option value={30}>30 fps (Standard)</option>
+                        <option value={50}>50 fps (European Broadcast / PAL HD)</option>
+                        <option value={60}>60 fps (Smooth 60fps)</option>
+                      </select>
+                    </div>
+
+                    {project.scenes.length > 1 && (
+                      <div className="group space-y-1">
+                        <div className="group-title">Multi-scene video</div>
+                        <label className="toggle">
+                          All scenes in one video
+                          <input
+                            type="checkbox"
+                            checked={renderAllScenes}
+                            onChange={(e) => setRenderAllScenes(e.target.checked)}
+                          />
+                        </label>
+                      </div>
+                    )}
+
+                    <div className="group space-y-2">
+                      <div className="group-title">Map Credit</div>
+                      <label className="toggle">
+                        Include map credit in video
+                        <input
+                          type="checkbox"
+                          checked={project.includeMapCredit ?? true}
+                          onChange={(e) =>
+                            onUpdateProject((prev) => ({
+                              ...prev,
+                              includeMapCredit: e.target.checked,
+                              updatedAt: Date.now(),
+                            }))
+                          }
+                        />
+                      </label>
+                      <div className="p-2.5 rounded-lg bg-[#1e293b] border border-slate-700 space-y-1.5">
+                        <div className="flex justify-between items-center text-[10px] text-slate-400">
+                          <span>Publish Attribution Credit:</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard.writeText(
+                                'Map data © OpenStreetMap contributors, MapLibre'
+                              );
+                              setCreditCopied(true);
+                              setTimeout(() => setCreditCopied(false), 2000);
+                            }}
+                            className="text-teal-400 font-semibold hover:underline"
+                          >
+                            {creditCopied ? 'Copied!' : 'Copy credit'}
+                          </button>
+                        </div>
+                        <div className="p-1.5 bg-[#0f172a] rounded font-mono text-[10px] text-slate-300 select-all border border-slate-800">
+                          Map data © OpenStreetMap contributors, MapLibre
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 )}
-
-                {/* Oct 30 changelog: Map credit on your page instead */}
-                <div className="group space-y-2">
-                  <div className="group-title">Map Credit</div>
-                  <label className="toggle">
-                    Include map credit in video
-                    <input
-                      type="checkbox"
-                      checked={project.includeMapCredit ?? true}
-                      onChange={(e) =>
-                        onUpdateProject((prev) => ({
-                          ...prev,
-                          includeMapCredit: e.target.checked,
-                          updatedAt: Date.now(),
-                        }))
-                      }
-                    />
-                  </label>
-                  <div className="p-2.5 rounded-lg bg-[var(--panel-2)] border border-[var(--border)] space-y-1.5">
-                    <div className="flex justify-between items-center text-[10px] text-[var(--muted)]">
-                      <span>Publish Attribution Credit:</span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard.writeText('Map data © OpenStreetMap contributors, MapLibre');
-                          setCreditCopied(true);
-                          setTimeout(() => setCreditCopied(false), 2000);
-                        }}
-                        className="text-[var(--accent)] font-semibold hover:underline"
-                      >
-                        {creditCopied ? 'Copied!' : 'Copy credit'}
-                      </button>
-                    </div>
-                    <div className="p-1.5 bg-[var(--panel)] rounded font-mono text-[10px] text-[var(--text)] select-all border border-[var(--border)]">
-                      Map data © OpenStreetMap contributors, MapLibre
-                    </div>
-                    <p className="text-[10px] text-[var(--muted)] leading-tight">
-                      You can leave the map credit out of the video as long as you put it where you publish the video.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="next pt-2">
-                  <button
-                    type="button"
-                    className="btn primary block"
-                    disabled={isRendering || activeScene.routes.every((r) => r.points.length === 0)}
-                    onClick={handleStartRender}
-                  >
-                    {isRendering ? 'Rendering...' : 'Render video'}
-                  </button>
-                </div>
               </aside>
             )}
 
