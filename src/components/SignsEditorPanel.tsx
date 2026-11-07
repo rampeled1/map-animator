@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import { MapSign } from '../types';
 import { extractExifGps } from '../utils/exifReader';
 import {
@@ -18,6 +18,7 @@ import {
 
 interface SignsEditorPanelProps {
   signs: MapSign[];
+  defaultCenter?: [number, number];
   onAddSign: (sign: MapSign) => void;
   onUpdateSign: (sign: MapSign) => void;
   onDeleteSign: (id: string) => void;
@@ -25,27 +26,35 @@ interface SignsEditorPanelProps {
   onSelectSign?: (id: string) => void;
 }
 
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
 export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
   signs,
+  defaultCenter = [12.4964, 41.9028],
   onAddSign,
   onUpdateSign,
   onDeleteSign,
   onReorderSigns,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [draggedIdx, setDraggedIdx] = useState<number | null>(null);
 
-  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
+  const processPhotoFile = async (file: File) => {
     // Check for EXIF GPS tags
     const gps = await extractExifGps(file);
-    const photoUrl = URL.createObjectURL(file);
+    const photoUrl = await readFileAsDataUrl(file);
 
     const newSign: MapSign = {
-      id: `sign-${Date.now()}`,
-      lng: gps ? gps.lng : 12.4964,
-      lat: gps ? gps.lat : 41.9028,
+      id: `sign-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      lng: gps ? gps.lng : defaultCenter[0],
+      lat: gps ? gps.lat : defaultCenter[1],
       text: file.name.replace(/\.[^/.]+$/, ''),
       style: 'photo',
       photoUrl,
@@ -57,10 +66,14 @@ export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
     onAddSign(newSign);
     if (gps) {
       alert(`Photo auto-located from EXIF GPS at ${gps.lat.toFixed(4)}°, ${gps.lng.toFixed(4)}°!`);
-    } else {
-      alert('No GPS metadata found in photo. Sign placed in the center of the current map view.');
     }
+  };
 
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    for (const file of files) {
+      await processPhotoFile(file);
+    }
     e.target.value = '';
   };
 
@@ -72,10 +85,12 @@ export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
     else if (style === 'finish') defaultText = 'Finish';
     else if (style === 'hotel') defaultText = 'Hotel';
 
+    // Offset slightly if multiple signs are created at the same center
+    const jitter = (signs.length % 5) * 0.002;
     const newSign: MapSign = {
       id: `sign-${Date.now()}`,
-      lng: 12.4964,
-      lat: 41.9028,
+      lng: defaultCenter[0] + jitter,
+      lat: defaultCenter[1] + jitter,
       text: defaultText,
       style,
       triggerMode: style === 'start' ? 'always' : 'onPassed',
@@ -105,7 +120,17 @@ export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
       </div>
 
       {/* Auto-Place Geo-Tagged Photo Dropzone */}
-      <label className="border-2 border-dashed border-[var(--border)] hover:border-[var(--accent)] rounded-xl p-3.5 flex flex-col items-center justify-center cursor-pointer transition-colors group bg-[var(--panel-2)] text-center">
+      <label
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={async (e) => {
+          e.preventDefault();
+          const files = Array.from(e.dataTransfer.files || []);
+          for (const file of files) {
+            await processPhotoFile(file);
+          }
+        }}
+        className="border-2 border-dashed border-[var(--border)] hover:border-[var(--accent)] rounded-xl p-3.5 flex flex-col items-center justify-center cursor-pointer transition-colors group bg-[var(--panel-2)] text-center"
+      >
         <Camera className="w-5 h-5 text-[var(--muted)] group-hover:text-[var(--accent)] mb-1.5 transition-colors" />
         <span className="font-semibold text-[var(--text)]">Drop Phone Photos</span>
         <span className="text-[10px] text-[var(--muted)] mt-0.5">
@@ -114,6 +139,7 @@ export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
         <input
           ref={fileInputRef}
           type="file"
+          multiple
           accept="image/jpeg,image/png,image/webp"
           onChange={handlePhotoUpload}
           className="hidden"
@@ -191,13 +217,30 @@ export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
         </div>
         {signs.length === 0 ? (
           <div className="p-3 rounded-lg bg-[var(--panel-2)] border border-[var(--border)] text-center text-[11px] text-[var(--muted)]">
-            No signs or photos placed yet.
+            No signs or photos placed yet. Click on the map or use the buttons above to place signs.
           </div>
         ) : (
           signs.map((sign, index) => (
             <div
               key={sign.id}
-              className="p-2.5 rounded-lg border border-[var(--border)] bg-[var(--panel-2)] space-y-2"
+              draggable
+              onDragStart={() => setDraggedIdx(index)}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={() => {
+                if (draggedIdx !== null && draggedIdx !== index && onReorderSigns) {
+                  const updated = [...signs];
+                  const [moved] = updated.splice(draggedIdx, 1);
+                  updated.splice(index, 0, moved);
+                  onReorderSigns(updated);
+                }
+                setDraggedIdx(null);
+              }}
+              onDragEnd={() => setDraggedIdx(null)}
+              className={`p-2.5 rounded-lg border bg-[var(--panel-2)] space-y-2 transition-opacity ${
+                draggedIdx === index
+                  ? 'opacity-50 border-[var(--accent)]'
+                  : 'border-[var(--border)]'
+              }`}
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-1 flex-1 min-w-0">
@@ -251,6 +294,12 @@ export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
                     onClick={() => onUpdateSign({ ...sign, triggerMode: 'onPassed' })}
                   >
                     When passed
+                  </button>
+                  <button
+                    aria-pressed={sign.triggerMode === 'whilePassing'}
+                    onClick={() => onUpdateSign({ ...sign, triggerMode: 'whilePassing' })}
+                  >
+                    While passing
                   </button>
                 </div>
               </div>

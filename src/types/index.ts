@@ -112,7 +112,7 @@ export interface MapSign {
   style: 'pin' | 'text' | 'photo' | 'roadSign' | 'camp' | 'start' | 'finish' | 'hotel';
   text: string;
   photoUrl?: string;
-  triggerMode: 'always' | 'onPassed';
+  triggerMode: 'always' | 'onPassed' | 'whilePassing';
   pauseSec?: number; // up to 20s
   size: number;
 }
@@ -125,6 +125,11 @@ export interface CameraBlock {
   zoom: number;
   pitch: number; // 0 - 80 degrees (Oct 20 changelog: tilt up to 80 deg)
   bearing: number; // 0 - 360 degrees
+  followOrient?: 'north' | 'heading';
+  rotateOffset?: number; // -180 to +180 deg
+  distanceKm?: number; // 0.1 to 20 km for tripod
+  heightKm?: number; // 0.1 to 10 km for tripod
+  orbitDirection?: 'clockwise' | 'anticlockwise'; // for orbit
   easing?: 'linear' | 'easeInOutQuad' | 'smooth';
 }
 

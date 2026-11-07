@@ -93,7 +93,8 @@ export const App: React.FC = () => {
    */
   const handleImportGPX = async (
     file: File,
-    options?: { importWaypoints: boolean; createDayEndSigns: boolean }
+    options?: { importWaypoints: boolean; createDayEndSigns: boolean },
+    sceneIndex = 0
   ) => {
     if (!activeProjectId) return;
     try {
@@ -107,7 +108,8 @@ export const App: React.FC = () => {
       const colors = ['#ff4d2e', '#ff9800', '#2196f3', '#4caf50', '#9c27b0', '#ffd600'];
 
       handleUpdateProject((prev) => {
-        const activeScene = prev.scenes[0];
+        const targetIdx = Math.min(Math.max(0, sceneIndex), prev.scenes.length - 1);
+        const activeScene = prev.scenes[targetIdx];
         const existingRoutes = activeScene.routes.filter((r) => r.points.length > 0);
 
         const newRoutes: Route[] = tracks.map((t, idx) => ({
@@ -122,19 +124,21 @@ export const App: React.FC = () => {
           stats: t.stats,
         }));
 
-        const mergedRoutes = [...existingRoutes, ...newRoutes];
+        const mergedRoutes = [...existingRoutes, ...newRoutes].slice(0, 6);
         const mergedSigns = [...activeScene.signs, ...signs];
 
         return {
           ...prev,
           updatedAt: Date.now(),
-          scenes: [
-            {
-              ...activeScene,
-              routes: mergedRoutes.length > 0 ? mergedRoutes : activeScene.routes,
-              signs: mergedSigns,
-            },
-          ],
+          scenes: prev.scenes.map((scene, idx) =>
+            idx === targetIdx
+              ? {
+                  ...scene,
+                  routes: mergedRoutes.length > 0 ? mergedRoutes : scene.routes,
+                  signs: mergedSigns,
+                }
+              : scene
+          ),
         };
       });
     } catch (err) {

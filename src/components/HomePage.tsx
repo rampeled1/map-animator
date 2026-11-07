@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { MapProject } from '../types';
 import { exportProjectFile } from '../utils/projectStorage';
 import { createPortal } from 'react-dom';
@@ -24,14 +24,38 @@ export const HomePage: React.FC<HomePageProps> = ({
   const [changelogOpen, setChangelogOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setFaqOpen(false);
+        setHelpOpen(false);
+        setChangelogOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const name = projectName.trim() || 'Alps by motorcycle';
     onCreateProject(name);
   };
 
+  const handlePageDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      onImportProjectFile(file);
+    }
+  };
+
   return (
-    <div className="site">
+    <div
+      className="site"
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={handlePageDrop}
+    >
       <header className="site-header">
         <div className="site-bar wide">
           <a className="brand" href="/" onClick={(e) => e.preventDefault()}>
@@ -104,7 +128,7 @@ export const HomePage: React.FC<HomePageProps> = ({
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept=".mapanimator,application/json"
+                  accept=".mapanim,.mapanimator,application/json"
                   className="hidden"
                   onChange={(e) => {
                     const f = e.target.files?.[0];
@@ -480,7 +504,7 @@ export const HomePage: React.FC<HomePageProps> = ({
               <div className="flex items-center justify-between border-b border-[var(--border)] pb-3">
                 <div>
                   <h2 className="text-lg font-bold text-[var(--text)]">Changelog</h2>
-                  <p className="text-xs text-[var(--muted)]">Version 0.2.0 — Latest updates</p>
+                  <p className="text-xs text-[var(--muted)]">Version 0.3.0 — Latest updates</p>
                 </div>
                 <button
                   onClick={() => setChangelogOpen(false)}
@@ -491,6 +515,17 @@ export const HomePage: React.FC<HomePageProps> = ({
               </div>
 
               <div className="space-y-4 text-xs text-[var(--text)] leading-relaxed">
+                <div className="border-l-2 border-[var(--accent)] pl-3">
+                  <h3 className="font-bold text-sm text-[var(--text)]">2 November 2026 (v0.3.0)</h3>
+                  <p className="text-[var(--muted)]">
+                    <b>Auto-routing point spacing (0.1–20 km / Auto):</b> Resample dense road geometries to custom point intervals or adaptive auto-spacing.<br />
+                    <b>Direct route manipulation on map:</b> Drag route waypoints to adjust curves, click any line segment to insert a new point, and double-click to toggle sharp corners.<br />
+                    <b>Multi-leg transport switching:</b> Split journeys across car, ferry, flight, or foot with real-time symbol updates.<br />
+                    <b>Reliable photo storage:</b> Persistent base64 data URLs for photos across browser sessions and project file exports.<br />
+                    <b>HTML5 drag & drop signs:</b> Reorder signs visually in the side panel with auto-synchronization.<br />
+                    <b>Composite video recorder:</b> High performance canvas recorder capturing WebGL maps, routes, and custom SVG overlays.
+                  </p>
+                </div>
                 <div className="border-l-2 border-[var(--accent)] pl-3">
                   <h3 className="font-bold text-sm text-[var(--text)]">30 October 2026</h3>
                   <p className="text-[var(--muted)]">

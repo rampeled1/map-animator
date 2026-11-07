@@ -34,6 +34,8 @@ interface RouteEditorPanelProps {
   activeRouteId: string;
   snapProfile: SnapProfile;
   onSetSnapProfile: (profile: SnapProfile) => void;
+  routingInterval?: number | 'auto';
+  onSetRoutingInterval?: (interval: number | 'auto') => void;
   onSelectRoute: (id: string) => void;
   onAddRoute: () => void;
   onDuplicateRoute?: (route: Route) => void;
@@ -64,6 +66,8 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
   activeRouteId,
   snapProfile,
   onSetSnapProfile,
+  routingInterval = 0.1,
+  onSetRoutingInterval,
   onSelectRoute,
   onAddRoute,
   onDuplicateRoute,
@@ -128,17 +132,38 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
   const handleAddLeg = () => {
     if (!activeRoute) return;
     const currentLegs = activeRoute.legs || [];
-    const fromIndex = activeRoute.points.length > 0 ? activeRoute.points.length - 1 : 0;
+    const defaultFromIdx =
+      activeRoute.points.length > 2
+        ? Math.floor(activeRoute.points.length / 2)
+        : activeRoute.points.length > 0
+        ? activeRoute.points.length - 1
+        : 0;
     const newLeg: RouteLeg = {
       id: `leg-${Date.now()}`,
-      fromPointIndex: fromIndex,
-      transportType: 'boat',
+      fromPointIndex: defaultFromIdx,
+      transportType: 'ferry',
       use3dSymbol: true,
       color: activeRoute.color,
     };
     onUpdateRoute({
       ...activeRoute,
       legs: [...currentLegs, newLeg],
+    });
+  };
+
+  const handleUpdateLeg = (legId: string, patch: Partial<RouteLeg>) => {
+    if (!activeRoute) return;
+    onUpdateRoute({
+      ...activeRoute,
+      legs: (activeRoute.legs || []).map((l) => (l.id === legId ? { ...l, ...patch } : l)),
+    });
+  };
+
+  const handleDeleteLeg = (legId: string) => {
+    if (!activeRoute) return;
+    onUpdateRoute({
+      ...activeRoute,
+      legs: (activeRoute.legs || []).filter((l) => l.id !== legId),
     });
   };
 
@@ -211,11 +236,62 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
             Walk
           </button>
         </div>
+
+        {/* Auto Routing Point Spacing: Auto or 0.1 to 20 km */}
+        {snapProfile !== 'off' && (
+          <div className="space-y-1.5 pt-2 border-t border-[var(--border)] mt-2">
+            <div className="flex justify-between items-center text-[10px]">
+              <span className="text-[var(--text)] font-medium">Point spacing</span>
+              <span className="font-mono font-semibold text-[var(--accent)]">
+                {routingInterval === 'auto' || !routingInterval
+                  ? 'Auto (road curves)'
+                  : `Every ${routingInterval < 1 ? routingInterval.toFixed(1) : routingInterval.toFixed(routingInterval % 1 === 0 ? 0 : 1)} km`}
+              </span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <button
+                type="button"
+                onClick={() => onSetRoutingInterval?.('auto')}
+                className={`px-2 py-1 rounded text-[10px] font-semibold border transition-all ${
+                  routingInterval === 'auto' || !routingInterval
+                    ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                    : 'border-[var(--border)] bg-[var(--panel-2)] text-[var(--muted)] hover:text-[var(--text)]'
+                }`}
+                title="Retain all natural road curvature points"
+              >
+                Auto
+              </button>
+              <input
+                type="range"
+                min={0.1}
+                max={20}
+                step={0.1}
+                value={typeof routingInterval === 'number' ? routingInterval : 1.0}
+                onChange={(e) => onSetRoutingInterval?.(parseFloat(e.target.value))}
+                className="flex-1 h-1.5 bg-[var(--panel-1)] rounded appearance-none cursor-pointer accent-[var(--accent)]"
+                title="Interval between points (0.1 to 20 km)"
+              />
+            </div>
+            <div className="flex justify-between text-[9px] text-[var(--muted)] px-0.5">
+              <span>0.1 km</span>
+              <span>5 km</span>
+              <span>20 km</span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* GPX / KML Upload Dropzone */}
       <div className="space-y-2">
-        <label className="border-2 border-dashed border-[var(--border)] hover:border-[var(--accent)] rounded-xl p-3 flex flex-col items-center justify-center cursor-pointer transition-colors group bg-[var(--panel-2)] text-center">
+        <label
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => {
+            e.preventDefault();
+            const file = e.dataTransfer.files?.[0];
+            if (file) onImportGPX(file, { importWaypoints, createDayEndSigns });
+          }}
+          className="border-2 border-dashed border-[var(--border)] hover:border-[var(--accent)] rounded-xl p-3 flex flex-col items-center justify-center cursor-pointer transition-colors group bg-[var(--panel-2)] text-center"
+        >
           <Upload className="w-5 h-5 text-[var(--muted)] group-hover:text-[var(--accent)] mb-1.5 transition-colors" />
           <span className="font-semibold text-[var(--text)]">Drop GPX, KML, KMZ or IGC</span>
           <span className="text-[10px] text-[var(--muted)] mt-0.5">
@@ -408,19 +484,55 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
                 <span>New leg</span>
               </button>
             </div>
-            <div className="space-y-1 max-h-28 overflow-y-auto">
+            <div className="space-y-1.5 max-h-40 overflow-y-auto">
               <div className="flex items-center justify-between p-1.5 bg-[var(--panel)] rounded text-[10px]">
                 <span className="font-medium">
                   Leg 1: {ALL_TRANSPORTS.find((t) => t.id === (activeRoute.transportType || 'car'))?.label}
                 </span>
-                <span className="text-[var(--muted)]">Start → End</span>
+                <span className="text-[var(--muted)]">From pt #1</span>
               </div>
               {activeRoute.legs?.map((leg, idx) => (
-                <div key={leg.id} className="flex items-center justify-between p-1.5 bg-[var(--panel)] rounded text-[10px]">
-                  <span className="font-medium">
-                    Leg {idx + 2}: {ALL_TRANSPORTS.find((t) => t.id === leg.transportType)?.label || leg.transportType}
-                  </span>
-                  <span className="text-[var(--muted)]">From pt #{leg.fromPointIndex}</span>
+                <div
+                  key={leg.id}
+                  className="flex items-center justify-between gap-1.5 p-1.5 bg-[var(--panel)] rounded text-[10px]"
+                >
+                  <select
+                    value={leg.transportType}
+                    onChange={(e) =>
+                      handleUpdateLeg(leg.id, { transportType: e.target.value as any })
+                    }
+                    className="bg-[var(--panel-2)] border border-[var(--border)] rounded px-1 py-0.5 text-[10px] text-[var(--text)] flex-1 min-w-0"
+                    title={`Leg ${idx + 2} transport`}
+                  >
+                    {ALL_TRANSPORTS.map((tm) => (
+                      <option key={tm.id} value={tm.id}>
+                        {tm.label}
+                      </option>
+                    ))}
+                  </select>
+                  <label className="flex items-center space-x-1 text-[var(--muted)] shrink-0">
+                    <span>pt#</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={Math.max(1, activeRoute.points.length)}
+                      value={leg.fromPointIndex + 1}
+                      onChange={(e) =>
+                        handleUpdateLeg(leg.id, {
+                          fromPointIndex: Math.max(0, Number(e.target.value) - 1),
+                        })
+                      }
+                      className="w-11 bg-[var(--panel-2)] border border-[var(--border)] rounded px-1 py-0.5 text-[10px] text-[var(--text)] text-center"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteLeg(leg.id)}
+                    className="text-[var(--muted)] hover:text-red-400 p-0.5"
+                    title="Delete leg"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
                 </div>
               ))}
             </div>

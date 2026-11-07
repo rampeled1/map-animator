@@ -2,6 +2,60 @@
 
 All notable changes to the Map Animator project are documented in this file.
 
+## [0.4.0] - 2026-11-07
+
+### Added
+- **Unified 3D WebGL Map Integration (`ThreeMapLayer`)**:
+  - Integrated Three.js into MapLibre GL JS using a shared WebGL context and projection matrix synchronization via `CustomLayerInterface`.
+  - Realistic 3D PBR vehicle models (Tank, Armored APC, Sedan, Fighter Jet, Quadcopter Drone) with dynamic ground projection and pitch/yaw banking.
+  - Extruded dual-ribbon trail geometry (inner vibrant route core with dark outer edge outline).
+- **Continuous Snake Path Engine (`snakePathInterpolation.ts`)**:
+  - Distance-based arc-length continuous interpolation eliminating stepped and jerky waypoint transitions.
+  - Catmull-Rom 3D spline tangent derivative calculation for smooth heading vectors.
+- **Road Routing & 0.1 km Curvature-Preserving Densifier (`roadRouter.ts`)**:
+  - Failover multi-mirror OSRM routing (`router.project-osrm.org` + `routing.openstreetmap.de`).
+  - Road densification algorithm that preserves 100% of natural road vertices (roundabouts, hairpin bends) while subdividing long straight segments at 0.1 km (100 m) intervals.
+- **Studio Director Camera Panel UI (`CameraEditorPanel.tsx`)**:
+  - Rebuilt camera step UI matching modern cinematic travel map studio workflows.
+  - Dedicated sub-panels for **Follow** (Same direction up / Direction of travel, Zoom, Tilt, Rotate), **Still** (Tilt slider, pan to view), **Tripod** (Distance km, Height km), and **Orbit** (Clockwise/Anticlockwise, Zoom, Tilt).
+  - Timeline keyframe block slicing with playhead `+` button and `'N'` keyboard shortcut, plus block deletion `×`.
+- **Non-Destructive Undo/Redo Engine**:
+  - Global `⌘Z` / `Ctrl+Z` (and `⌘⇧Z` / `Ctrl+Y`) action history stack rewinding full project mutations (routes, points, cameras, signs, settings).
+
+
+### Added
+- **Auto-Routing Point Spacing (0.1 km – 20 km or Auto)**:
+  - Added geodesic (Haversine) resampling engine `resampleRouteByDistance` in [`src/utils/roadRouter.ts`](file:///Users/rampeled/developer/map-animator/src/utils/roadRouter.ts).
+  - Users can configure point placement intervals from `0.1 km` (100 m) to `20.0 km` when auto-routing (Car, Bike, Walk).
+  - One-click `Auto` mode to retain OSRM's native road curve coordinates.
+  - Interactive slider and real-time frequency badge inside the **Snap to roads** panel.
+- **Interactive Route Canvas Interactions**:
+  - Live route point dragging with smooth map pan release.
+  - Click on any route line segment to insert an interpolated waypoint in between.
+  - Double-click on any waypoint to toggle `sharpCorner` styling.
+  - Route waypoint options dialog supporting pause (`0.5s`–`20s`), sharp corners, delete (`del`), and mid-route transport mode changes (`leg:<transport>`).
+- **Multi-Leg Route Editing & Dynamic Symbol Switching**:
+  - Full leg manager with transport picker, starting point number (`pt#`), and delete button.
+  - Dynamic vehicle shape and route line color switching during playback as the playhead passes each leg's starting index.
+- **Persistent Photo Signs & Drag-and-Drop Reordering**:
+  - Uploaded photos are now stored as persistent Data URLs inside projects, surviving browser storage reloads and export to `.mapanim` files.
+  - HTML5 drag-and-drop list reordering with visual drag preview.
+  - Support for `whilePassing` proximity visibility trigger mode alongside `always` and `onPassed`.
+- **Composite Video Recording Engine**:
+  - Offscreen canvas compositor combines MapLibre WebGL canvas with high-resolution SVG route lines, vehicle symbols, signs, photos, and HUD overlays into sharp MP4/WebM exports.
+  - Auto-strips editor framing chrome and anchor handles from exported video.
+- **Telemetry HUD Upgrades**:
+  - Live animated elevation profile chart inside video frame with animated playhead cursor.
+  - Units of measurement conversion: Metric (`km`, `m`, `km/h`), Imperial (`mi`, `ft`, `mph`), and Nautical (`nm`, `ft`, `kn`).
+  - Overlay aesthetic themes: Dark Glass, Crisp Light, Vintage Parchment, Bold Sport, Outdoor Topo, Minimalist Monochrome.
+- **Timeline & UI Controls**:
+  - Configurable scene duration selector (`5s`–`120s`).
+  - Preview playback speed toggle (`0.5x`, `1.0x`, `2.0x`).
+  - Direct keyboard shortcut `?` opening to the **Shortcuts** guide tab.
+  - Camera keyframe markers displayed on the timeline scrubber.
+- **Multi-Scene GPX Import Fix**:
+  - GPX/KML/KMZ files imported into a specific scene index without overwriting other scenes.
+
 ## [0.2.0] - 2026-11-01
 
 ### Added
