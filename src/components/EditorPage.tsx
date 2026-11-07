@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { MapProject, StepId, Route, MapTheme, RoutePoint, MapSign, OverlayConfig, CameraBlock, CameraModePreset, AspectRatioOption, DurationPreset } from '../types';
+import { MapProject, StepId, Route, MapTheme, RoutePoint, MapSign, OverlayConfig, CameraBlock, CameraModePreset, AspectRatioOption, DurationPreset, DestinationPreview } from '../types';
 import { MapViewer } from './MapViewer';
 import { RouteEditorPanel } from './RouteEditorPanel';
 import { SignsEditorPanel } from './SignsEditorPanel';
@@ -170,6 +170,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   const [renderAllScenes, setRenderAllScenes] = useState(false);
   const [creditCopied, setCreditCopied] = useState(false);
   const [fitRouteRequested, setFitRouteRequested] = useState<Route | null>(null);
+  const [destinationPreview, setDestinationPreview] = useState<DestinationPreview | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [helpTab, setHelpTab] = useState<'guide' | 'shortcuts' | 'heic'>('guide');
   const stageRef = useRef<HTMLDivElement>(null);
@@ -813,6 +814,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
             onUpdateRoute={handleUpdateRoute}
             onDeleteRoute={handleDeleteRoute}
             onImportGPX={(file, opts) => onImportGPX(file, opts, activeSceneIndex)}
+            onPreviewDestination={(dest) => setDestinationPreview(dest)}
             onNext={() => setCurrentStep('camera')}
           />
         )}
@@ -1171,6 +1173,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                     includeMapCredit={project.includeMapCredit ?? true}
                     isPlaying={isPlaying}
                     fitRouteRequested={fitRouteRequested}
+                    destinationPreview={destinationPreview}
                     onUpdateRoute={handleUpdateRoute}
                     onAddPoint={handleAddPoint}
                     onAddSign={handleAddSign}
@@ -1454,6 +1457,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                 includeMapCredit={project.includeMapCredit ?? true}
                 isPlaying={isPlaying}
                 fitRouteRequested={fitRouteRequested}
+                destinationPreview={destinationPreview}
                 onUpdateRoute={handleUpdateRoute}
                 onAddPoint={handleAddPoint}
                 onAddSign={handleAddSign}

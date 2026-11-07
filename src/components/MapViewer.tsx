@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
-import { Route, MapSign, CameraBlock, StepId, OverlayConfig, TransportType, CameraModePreset, AspectRatioOption } from '../types';
+import { Route, MapSign, CameraBlock, StepId, OverlayConfig, TransportType, CameraModePreset, AspectRatioOption, DestinationPreview } from '../types';
 import { buildMapStyle } from '../utils/mapStyleBuilder';
 import { calculateTrackStats } from '../utils/gpxParser';
 import { ThreeMapLayer } from '../utils/threeMapLayer';
@@ -50,6 +50,7 @@ interface MapViewerProps {
   includeMapCredit?: boolean;
   isPlaying?: boolean;
   fitRouteRequested?: Route | null;
+  destinationPreview?: DestinationPreview | null;
   onUpdateRoute?: (route: Route) => void;
   onAddPoint?: (point: { lng: number; lat: number }) => void;
   onAddSign?: (sign: MapSign) => void;
@@ -353,6 +354,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   includeMapCredit = true,
   isPlaying,
   fitRouteRequested,
+  destinationPreview,
   onUpdateRoute,
   onAddPoint,
   onAddSign,
@@ -686,11 +688,23 @@ export const MapViewer: React.FC<MapViewerProps> = ({
           [minLng, minLat],
           [maxLng, maxLat],
         ],
-        { padding: 80, maxZoom: 13, duration: 800 }
+        { padding: 80, maxZoom: 15, duration: 800 }
       );
     }
     prevPointsCountRef.current = allPts.length;
   }, [routes]);
+
+  // Smoothly pan & fly to destination preview whenever the user enters a destination
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !destinationPreview) return;
+    map.flyTo({
+      center: [destinationPreview.lng, destinationPreview.lat],
+      zoom: Math.max(map.getZoom(), 11),
+      duration: 1200,
+      essential: true,
+    });
+  }, [destinationPreview]);
 
   // Camera tracking during animation playback & scrubbing (follow, still, tripod, orbit, + cameraBlocks)
   useEffect(() => {
@@ -1645,6 +1659,58 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                 );
               })
             )}
+
+          {/* Destination Pin Marker on Map when entered */}
+          {destinationPreview && map && (() => {
+            const pos = map.project([destinationPreview.lng, destinationPreview.lat]);
+            return (
+              <g
+                key="destination-preview-pin"
+                transform={`translate(${pos.x}, ${pos.y})`}
+                className="pointer-events-none select-none transition-all duration-300"
+              >
+                {/* Ground shadow */}
+                <ellipse cx={0} cy={0} rx={12 * scale} ry={5 * scale} fill="rgba(0,0,0,0.4)" />
+                {/* Pulsing beacon ring */}
+                <circle cx={0} cy={-28 * scale} r={22 * scale} fill="none" stroke="#f97316" strokeWidth="2.5" opacity="0.6">
+                  <animate attributeName="r" values={`${18 * scale};${32 * scale};${18 * scale}`} dur="2s" repeatCount="indefinite" />
+                  <animate attributeName="opacity" values="0.8;0.1;0.8" dur="2s" repeatCount="indefinite" />
+                </circle>
+                {/* Vibrant Pin Body */}
+                <path
+                  d={`M0 0 C -4 -10, -18 -22, -18 -36 C -18 -48, -10 -56, 0 -56 C 10 -56, 18 -48, 18 -36 C 18 -22, 4 -10, 0 0 Z`}
+                  fill="#f97316"
+                  stroke="#ffffff"
+                  strokeWidth="2.5"
+                />
+                <circle cx={0} cy={-36 * scale} r={6 * scale} fill="#ffffff" />
+                {/* Destination label badge */}
+                <g transform={`translate(0, ${-64 * scale})`}>
+                  <rect
+                    x={-((destinationPreview.name.length * 7.5 + 24) / 2)}
+                    y={-14}
+                    width={destinationPreview.name.length * 7.5 + 24}
+                    height={24}
+                    rx={12}
+                    fill="#0f172ae6"
+                    stroke="#f97316"
+                    strokeWidth="1.5"
+                  />
+                  <text
+                    x={0}
+                    y={3}
+                    textAnchor="middle"
+                    fill="#ffffff"
+                    fontSize={11.5}
+                    fontWeight="700"
+                    fontFamily="sans-serif"
+                  >
+                    🎯 {destinationPreview.name}
+                  </text>
+                </g>
+              </g>
+            );
+          })()}
         </svg>
       )}
 

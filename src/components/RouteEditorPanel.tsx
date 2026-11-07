@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Route, RouteLeg, TransportType, UIMode } from '../types';
+import { Route, RouteLeg, TransportType, UIMode, DestinationPreview } from '../types';
 import {
   SnapProfile,
   PlaceSuggestion,
@@ -52,6 +52,7 @@ interface RouteEditorPanelProps {
   onUpdateRoute: (route: Route) => void;
   onDeleteRoute?: (id: string) => void;
   onImportGPX: (file: File, options?: { importWaypoints: boolean; createDayEndSigns: boolean }) => void;
+  onPreviewDestination?: (dest: DestinationPreview | null) => void;
   onNext?: () => void;
 }
 
@@ -101,6 +102,7 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
   onUpdateRoute,
   onDeleteRoute,
   onImportGPX,
+  onPreviewDestination,
   onNext,
 }) => {
   const activeRoute = routes.find((r) => r.id === activeRouteId) || routes[0];
@@ -174,6 +176,17 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
     );
     setActiveStopAutocomplete(null);
     setSuggestions([]);
+
+    // When the destination stop (or any selected stop) is chosen, show it immediately on the map
+    const isDestination = stopId === stops[stops.length - 1]?.id;
+    onPreviewDestination?.({
+      id: place.id,
+      name: place.name,
+      fullName: place.fullName,
+      lng: place.lng,
+      lat: place.lat,
+      isDestination,
+    });
   };
 
   const handleAddStop = () => {
@@ -402,6 +415,19 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
                   setActiveStopAutocomplete(stop.id);
                   if (stop.query.trim().length >= 2) {
                     handleStopQueryChange(stop.id, stop.query);
+                  }
+                }}
+                onKeyDown={async (e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (suggestions.length > 0) {
+                      handleSelectSuggestion(stop.id, suggestions[0]);
+                    } else if (stop.query.trim().length >= 2) {
+                      const matches = await searchPlaceSuggestions(stop.query);
+                      if (matches.length > 0) {
+                        handleSelectSuggestion(stop.id, matches[0]);
+                      }
+                    }
                   }
                 }}
                 onChange={(e) => handleStopQueryChange(stop.id, e.target.value)}

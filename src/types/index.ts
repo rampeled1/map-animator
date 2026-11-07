@@ -1,6 +1,15 @@
 export type StepId = 'route' | 'camera' | 'map' | 'line' | 'title' | 'signs' | 'overlays' | 'preview';
 export type UIMode = 'simple' | 'advanced';
 
+export interface DestinationPreview {
+  id: string;
+  name: string;
+  fullName: string;
+  lng: number;
+  lat: number;
+  isDestination?: boolean;
+}
+
 export type TransportType =
   | 'motorcycle'
   | 'dualsport'
