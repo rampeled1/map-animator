@@ -137,41 +137,108 @@ async function searchPhotonPlaces(
 ): Promise<SearchPlace[]> {
   const trimmed = query.trim();
   if (trimmed.length < 2) return [];
-  const url = new URL('https://photon.komoot.io/api/');
-  url.searchParams.set('q', trimmed);
-  url.searchParams.set('limit', '7');
-  url.searchParams.set('lang', 'en');
-  if (center) {
-    url.searchParams.set('lon', center[0].toFixed(3));
-    url.searchParams.set('lat', center[1].toFixed(3));
-  }
-  const res = await fetch(url, { signal });
-  if (!res.ok) throw new Error(`Search failed (${res.status})`);
-  const data = await res.json();
-  const seen = new Set<string>();
-  const results: SearchPlace[] = [];
-  for (const feat of data.features ?? []) {
-    const p = feat.properties ?? {};
-    const name =
-      p.name ?? (p.street ? [p.street, p.housenumber].filter(Boolean).join(' ') : undefined);
-    if (!name) continue;
-    const context = [p.city, p.state, p.country]
-      .filter((v, i, arr) => v && v !== name && arr.indexOf(v) === i)
-      .join(', ');
-    const key = `${name}|${context}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const ext = p.extent;
-    results.push({
-      id: `${p.osm_type ?? ''}${p.osm_id ?? name}`,
-      name,
-      context,
-      kind: classifyPlaceKind(p),
-      center: feat.geometry.coordinates,
-      bounds: ext ? [ext[0], ext[3], ext[2], ext[1]] : undefined,
+
+  // 1. Try OpenStreetMap Nominatim first (high reliability, recognizes airport IATA codes like GYD, JFK, LHR)
+  try {
+    const nomUrl = new URL('https://nominatim.openstreetmap.org/search');
+    nomUrl.searchParams.set('q', trimmed);
+    nomUrl.searchParams.set('format', 'json');
+    nomUrl.searchParams.set('addressdetails', '1');
+    nomUrl.searchParams.set('limit', '7');
+    nomUrl.searchParams.set('accept-language', 'en');
+
+    const res = await fetch(nomUrl.toString(), {
+      signal,
+      headers: { 'User-Agent': 'MapAnimator/1.0' },
     });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        const results: SearchPlace[] = [];
+        const seen = new Set<string>();
+
+        for (const item of data) {
+          const lat = parseFloat(item.lat);
+          const lng = parseFloat(item.lon);
+          if (isNaN(lat) || isNaN(lng)) continue;
+
+          const addr = item.address || {};
+          const name = item.name || item.display_name.split(',')[0].trim();
+          const contextParts = [
+            addr.city || addr.town || addr.village || addr.municipality || addr.county,
+            addr.state,
+            addr.country,
+          ].filter((v, i, a) => v && v !== name && a.indexOf(v) === i);
+          const context = contextParts.join(', ');
+          const key = `${name}|${context}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          const bbox = item.boundingbox;
+          const bounds: [number, number, number, number] | undefined =
+            Array.isArray(bbox) && bbox.length === 4
+              ? [parseFloat(bbox[2]), parseFloat(bbox[0]), parseFloat(bbox[3]), parseFloat(bbox[1])]
+              : undefined;
+
+          results.push({
+            id: `osm-${item.osm_type || 'p'}-${item.osm_id || name}`,
+            name,
+            context,
+            kind: item.type === 'aerodrome' || item.class === 'aeroway' ? 'place' : classifyPlaceKind(item),
+            center: [lng, lat],
+            bounds,
+          });
+        }
+        if (results.length > 0) return results.slice(0, 7);
+      }
+    }
+  } catch {
+    // Continue to Photon
   }
-  return results;
+
+  // 2. Secondary fallback: Photon Komoot API
+  try {
+    const url = new URL('https://photon.komoot.io/api/');
+    url.searchParams.set('q', trimmed);
+    url.searchParams.set('limit', '7');
+    url.searchParams.set('lang', 'en');
+    if (center) {
+      url.searchParams.set('lon', center[0].toFixed(3));
+      url.searchParams.set('lat', center[1].toFixed(3));
+    }
+    const res = await fetch(url, { signal });
+    if (res.ok) {
+      const data = await res.json();
+      const seen = new Set<string>();
+      const results: SearchPlace[] = [];
+      for (const feat of data.features ?? []) {
+        const p = feat.properties ?? {};
+        const name =
+          p.name ?? (p.street ? [p.street, p.housenumber].filter(Boolean).join(' ') : undefined);
+        if (!name) continue;
+        const context = [p.city, p.state, p.country]
+          .filter((v, i, arr) => v && v !== name && arr.indexOf(v) === i)
+          .join(', ');
+        const key = `${name}|${context}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const ext = p.extent;
+        results.push({
+          id: `${p.osm_type ?? ''}${p.osm_id ?? name}`,
+          name,
+          context,
+          kind: classifyPlaceKind(p),
+          center: feat.geometry.coordinates,
+          bounds: ext ? [ext[0], ext[3], ext[2], ext[1]] : undefined,
+        });
+      }
+      return results;
+    }
+  } catch {
+    // Handled below
+  }
+
+  return [];
 }
 
 function getAspectRatioDims(aspect: string, size: number): [number, number] {

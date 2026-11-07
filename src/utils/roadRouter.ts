@@ -180,22 +180,33 @@ export interface PlaceSuggestion {
 
 const BUILTIN_PLACES: PlaceSuggestion[] = [
   { id: 'baku', name: 'Baku', context: 'Azerbaijan', fullName: 'Baku, Azerbaijan', lng: 49.8671, lat: 40.4093 },
+  { id: 'gyd', name: 'Heydar Aliyev International Airport (GYD)', context: 'Baku, Azerbaijan', fullName: 'Heydar Aliyev International Airport (GYD), Baku, Azerbaijan', lng: 50.0491, lat: 40.4728 },
   { id: 'laza', name: 'Laza', context: 'Qusar, Azerbaijan', fullName: 'Laza, Azerbaijan', lng: 48.1156, lat: 41.2969 },
   { id: 'gabala', name: 'Qabala', context: 'Azerbaijan', fullName: 'Qabala, Azerbaijan', lng: 47.87, lat: 40.9982 },
   { id: 'shaki', name: 'Sheki', context: 'Azerbaijan', fullName: 'Sheki, Azerbaijan', lng: 47.1706, lat: 41.1919 },
   { id: 'telaviv', name: 'Tel Aviv', context: 'Israel', fullName: 'Tel Aviv, Israel', lng: 34.7818, lat: 32.0853 },
+  { id: 'tlv', name: 'Ben Gurion Airport (TLV)', context: 'Tel Aviv, Israel', fullName: 'Ben Gurion Airport (TLV), Tel Aviv, Israel', lng: 34.8854, lat: 32.0055 },
   { id: 'jerusalem', name: 'Jerusalem', context: 'Israel', fullName: 'Jerusalem, Israel', lng: 35.2137, lat: 31.7683 },
   { id: 'eilat', name: 'Eilat', context: 'Israel', fullName: 'Eilat, Israel', lng: 34.9482, lat: 29.5581 },
   { id: 'paris', name: 'Paris', context: 'France', fullName: 'Paris, France', lng: 2.3522, lat: 48.8566 },
+  { id: 'cdg', name: 'Charles de Gaulle Airport (CDG)', context: 'Paris, France', fullName: 'Charles de Gaulle Airport (CDG), Paris, France', lng: 2.5479, lat: 49.0097 },
   { id: 'london', name: 'London', context: 'United Kingdom', fullName: 'London, United Kingdom', lng: -0.1276, lat: 51.5072 },
+  { id: 'lhr', name: 'Heathrow Airport (LHR)', context: 'London, United Kingdom', fullName: 'Heathrow Airport (LHR), London, United Kingdom', lng: -0.4543, lat: 51.47 },
   { id: 'rome', name: 'Rome', context: 'Italy', fullName: 'Rome, Italy', lng: 12.4964, lat: 41.9028 },
+  { id: 'fco', name: 'Fiumicino Airport (FCO)', context: 'Rome, Italy', fullName: 'Fiumicino Airport (FCO), Rome, Italy', lng: 12.2389, lat: 41.8003 },
   { id: 'berlin', name: 'Berlin', context: 'Germany', fullName: 'Berlin, Germany', lng: 13.405, lat: 52.52 },
+  { id: 'ber', name: 'Berlin Brandenburg Airport (BER)', context: 'Berlin, Germany', fullName: 'Berlin Brandenburg Airport (BER), Berlin, Germany', lng: 13.5017, lat: 52.3667 },
   { id: 'newyork', name: 'New York', context: 'USA', fullName: 'New York, USA', lng: -74.006, lat: 40.7128 },
+  { id: 'jfk', name: 'John F. Kennedy International Airport (JFK)', context: 'New York, USA', fullName: 'John F. Kennedy International Airport (JFK), New York, USA', lng: -73.7781, lat: 40.6413 },
   { id: 'tokyo', name: 'Tokyo', context: 'Japan', fullName: 'Tokyo, Japan', lng: 139.6917, lat: 35.6895 },
+  { id: 'hnd', name: 'Tokyo Haneda Airport (HND)', context: 'Tokyo, Japan', fullName: 'Tokyo Haneda Airport (HND), Tokyo, Japan', lng: 139.7798, lat: 35.5494 },
 ];
 
 /**
- * Searches place names with autocomplete via Photon API and instant built-in fallback.
+ * Searches place names with autocomplete via multi-provider fallback:
+ * 1. OpenStreetMap Nominatim (supports airports, GYD, JFK, LHR, landmarks, addresses)
+ * 2. Photon API mirror
+ * 3. Built-in fast offline lookup
  */
 export async function searchPlaceSuggestions(
   query: string,
@@ -204,10 +215,72 @@ export async function searchPlaceSuggestions(
   const q = query.trim().toLowerCase();
   if (q.length < 2) return [];
 
-  const localMatches = BUILTIN_PLACES.filter(
-    (p) => p.fullName.toLowerCase().includes(q) || p.name.toLowerCase().includes(q)
-  );
+  const qWords = q.split(/\s+/).filter(Boolean);
+  const localMatches = BUILTIN_PLACES.filter((p) => {
+    const targetStr = `${p.fullName} ${p.name} ${p.id} ${p.context} airport aeroport`.toLowerCase();
+    return (
+      p.fullName.toLowerCase().includes(q) ||
+      p.name.toLowerCase().includes(q) ||
+      p.id.toLowerCase() === q ||
+      (qWords.length > 1 && qWords.every((w) => targetStr.includes(w)))
+    );
+  });
 
+  // 1. Try OpenStreetMap Nominatim first (high reliability, recognizes IATA codes like GYD, JFK, LHR)
+  try {
+    const nomUrl = new URL('https://nominatim.openstreetmap.org/search');
+    nomUrl.searchParams.set('q', query.trim());
+    nomUrl.searchParams.set('format', 'json');
+    nomUrl.searchParams.set('addressdetails', '1');
+    nomUrl.searchParams.set('limit', '7');
+    nomUrl.searchParams.set('accept-language', 'en');
+
+    const res = await fetch(nomUrl.toString(), {
+      signal,
+      headers: { 'User-Agent': 'MapAnimator/1.0' },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        const results: PlaceSuggestion[] = [...localMatches];
+        const seen = new Set(localMatches.map((m) => m.fullName.toLowerCase()));
+
+        for (const item of data) {
+          const lat = parseFloat(item.lat);
+          const lng = parseFloat(item.lon);
+          if (isNaN(lat) || isNaN(lng)) continue;
+
+          const addr = item.address || {};
+          const mainName = item.name || item.display_name.split(',')[0].trim();
+          const contextParts = [
+            addr.city || addr.town || addr.village || addr.municipality || addr.county,
+            addr.state,
+            addr.country,
+          ].filter((v, i, a) => v && v !== mainName && a.indexOf(v) === i);
+          const context = contextParts.join(', ');
+          const fullName = context ? `${mainName}, ${context}` : item.display_name;
+
+          if (seen.has(fullName.toLowerCase()) || seen.has(mainName.toLowerCase())) continue;
+          seen.add(fullName.toLowerCase());
+          seen.add(mainName.toLowerCase());
+
+          results.push({
+            id: `osm-${item.osm_type || 'p'}-${item.osm_id || results.length}`,
+            name: mainName,
+            context,
+            fullName,
+            lng,
+            lat,
+          });
+        }
+        if (results.length > 0) return results.slice(0, 7);
+      }
+    }
+  } catch {
+    // Continue to Photon or local
+  }
+
+  // 2. Secondary fallback: Photon Komoot API
   try {
     const url = new URL('https://photon.komoot.io/api/');
     url.searchParams.set('q', query.trim());
@@ -239,10 +312,10 @@ export async function searchPlaceSuggestions(
           lat: Number(coords[1]),
         });
       }
-      return results.slice(0, 7);
+      if (results.length > 0) return results.slice(0, 7);
     }
   } catch {
-    // Fallback to local matches if offline
+    // Fallback to local matches if offline or blocked
   }
 
   return localMatches;

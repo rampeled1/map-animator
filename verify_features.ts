@@ -157,6 +157,16 @@ console.log('\n9. Checking UX Simplification v3.0 (Simple Journey Builder & Auto
   const lazaSuggestions = await searchPlaceSuggestions('Laza');
   assert(lazaSuggestions.length > 0 && lazaSuggestions[0].fullName.includes('Laza'), `Found place suggestion for Laza: "${lazaSuggestions[0]?.fullName}"`);
 
+  const gydSuggestions = await searchPlaceSuggestions('gyd airport');
+  assert(
+    gydSuggestions.length > 0 &&
+      (gydSuggestions[0].name.toLowerCase().includes('heydar') ||
+        gydSuggestions[0].name.toLowerCase().includes('heydər') ||
+        gydSuggestions[0].name.toLowerCase().includes('gyd') ||
+        gydSuggestions[0].fullName.toLowerCase().includes('gyd')),
+    `Found place suggestion for GYD Airport: "${gydSuggestions[0]?.fullName}"`
+  );
+
   // Verify plane journey arc generation (synchronous offline-safe geodesic arc)
   const planePts = await buildJourneyFromStops(
     [
