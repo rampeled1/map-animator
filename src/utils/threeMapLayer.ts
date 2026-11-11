@@ -24,6 +24,7 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
   private tipTargetMesh: THREE.Mesh | null = null;
 
   private currentProgress: number = 0;
+  private currentSplineU: number = 0;
   private routeColorHex: string = '#ff4d2e';
   private modelKind: ModelKind3D = 'tank';
   private customModelFile?: File;
@@ -139,6 +140,7 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
       this.loadVehicleModel();
     }
     this.pathEngine.updatePoints(points);
+    this.currentSplineU = this.pathEngine.getSplineParameterAtDistanceProgress(this.currentProgress);
   }
 
   public setModelKind(kind: ModelKind3D, customFile?: File) {
@@ -147,16 +149,28 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
     this.loadVehicleModel();
   }
 
-  public setProgress(progress: number) {
-    this.currentProgress = Math.max(0, Math.min(1, progress));
+  public setProgress(distanceProgress: number) {
+    this.currentProgress = Math.max(0, Math.min(1, distanceProgress));
+    this.currentSplineU = this.pathEngine.getSplineParameterAtDistanceProgress(this.currentProgress);
   }
 
   /**
    * Returns current 3D position & vector kinematics for Chase Camera
    */
-  public getKinematics(t?: number): PathSample3D | null {
-    const sampleT = t !== undefined ? t : this.currentProgress;
-    return this.pathEngine.sample(sampleT);
+  public getKinematics(distanceProgress?: number): PathSample3D | null {
+    const u = distanceProgress !== undefined
+      ? this.pathEngine.getSplineParameterAtDistanceProgress(distanceProgress)
+      : this.currentSplineU;
+    return this.pathEngine.sample(u);
+  }
+
+  public getRemainingDistanceKm(distanceProgress?: number): number {
+    const p = distanceProgress !== undefined ? distanceProgress : this.currentProgress;
+    return this.pathEngine.getRemainingDistanceKm(p);
+  }
+
+  public getTotalDistanceKm(): number {
+    return this.pathEngine.getTotalDistanceKm();
   }
 
   public render(_gl: WebGLRenderingContext | WebGL2RenderingContext, options: maplibregl.CustomRenderMethodInput) {
@@ -165,7 +179,7 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
     // Synchronize Three.js camera projection matrix with MapLibre's modelViewProjectionMatrix
     this.camera.projectionMatrix = new THREE.Matrix4().fromArray(options.modelViewProjectionMatrix);
 
-    const sample = this.pathEngine.sample(this.currentProgress);
+    const sample = this.pathEngine.sample(this.currentSplineU);
 
     if (sample && this.vehicleGroup) {
       this.vehicleGroup.visible = true;
@@ -197,7 +211,7 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
       // Half width ~ 3.5 meters
       const ribbonHalfWidth = mercatorScale * 3.5;
       const ribbonData = this.pathEngine.generateRibbonGeometry(
-        this.currentProgress,
+        this.currentSplineU,
         ribbonHalfWidth,
         250
       );

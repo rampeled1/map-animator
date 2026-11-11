@@ -53,41 +53,39 @@ export const CameraEditorPanel: React.FC<CameraEditorPanelProps> = ({
   durationPreset = 40,
   duration = 40,
   onSetDuration,
-  cameraMode,
+  cameraMode: _cameraMode,
   onSetCameraMode,
-  followOrient,
+  followOrient: _followOrient,
   onSetFollowOrient,
-  rotateOffset = 0,
-  onSetRotateOffset,
+  rotateOffset: _rotateOffset = 0,
+  onSetRotateOffset: _onSetRotateOffset,
   followZoom,
   onSetFollowZoom,
   tilt,
   onSetTilt,
-  distanceKm = 2.3,
-  onSetDistanceKm,
-  heightKm = 2.9,
-  onSetHeightKm,
-  orbitDirection = 'clockwise',
-  onSetOrbitDirection,
+  distanceKm: _distanceKm = 2.3,
+  onSetDistanceKm: _onSetDistanceKm,
+  heightKm: _heightKm = 2.9,
+  onSetHeightKm: _onSetHeightKm,
+  orbitDirection: _orbitDirection = 'clockwise',
+  onSetOrbitDirection: _onSetOrbitDirection,
   smoothness = 0.5,
   onSetSmoothness,
   onNext,
 }) => {
-  const [advancedOpen, setAdvancedOpen] = useState(
-    cameraMode === 'tripod' || cameraMode === 'orbit'
-  );
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [customDurationInput, setCustomDurationInput] = useState<number>(duration);
 
   return (
-    <div className="flex flex-col h-full text-slate-100 font-sans space-y-6">
+    <aside className="panel w-85 h-full overflow-y-auto p-5 flex flex-col space-y-5 text-xs bg-[#0f172a] border-r border-slate-800 text-slate-100 font-sans">
       {/* 1. Header */}
       <div>
         <span className="text-[11px] font-bold tracking-wider text-teal-400 uppercase">
           STEP 2 · CAMERA
         </span>
-        <h1 className="text-2xl font-extrabold text-slate-100 mt-1 mb-1.5 tracking-tight">
+        <h2 className="text-2xl font-extrabold text-slate-100 mt-1 mb-1 tracking-tight">
           How does the camera fly?
-        </h1>
+        </h2>
         <p className="text-xs text-slate-400 leading-relaxed">
           How the camera flies, how high, which format and how long the video is.
         </p>
@@ -104,7 +102,7 @@ export const CameraEditorPanel: React.FC<CameraEditorPanelProps> = ({
           </span>
         </div>
 
-        <div className="grid grid-cols-3 gap-2.5">
+        <div className="grid grid-cols-2 gap-3">
           {/* Preset A: Fly Along */}
           <button
             type="button"
@@ -115,7 +113,7 @@ export const CameraEditorPanel: React.FC<CameraEditorPanelProps> = ({
               onSetTilt(55);
               onSetFollowZoom(15);
             }}
-            className={`flex flex-col items-center justify-center p-3 rounded-xl border text-center transition-all duration-200 cursor-pointer ${
+            className={`flex flex-col items-center justify-center p-3.5 rounded-xl border text-center transition-all duration-200 cursor-pointer ${
               cameraPreset === 'fly_along'
                 ? 'bg-teal-500/10 border-teal-500 ring-2 ring-teal-500'
                 : 'bg-[#1e293b] border-slate-700 hover:border-teal-400'
@@ -147,45 +145,7 @@ export const CameraEditorPanel: React.FC<CameraEditorPanelProps> = ({
             </span>
           </button>
 
-          {/* Preset B: Follow (North Up) */}
-          <button
-            type="button"
-            onClick={() => {
-              onSetCameraPreset('follow_north_up');
-              onSetCameraMode('follow');
-              onSetFollowOrient('north');
-              onSetTilt(35);
-              onSetFollowZoom(14);
-              onSetRotateOffset?.(0);
-            }}
-            className={`flex flex-col items-center justify-center p-3 rounded-xl border text-center transition-all duration-200 cursor-pointer ${
-              cameraPreset === 'follow_north_up'
-                ? 'bg-teal-500/10 border-teal-500 ring-2 ring-teal-500'
-                : 'bg-[#1e293b] border-slate-700 hover:border-teal-400'
-            }`}
-          >
-            {/* SVG Thumbnail: Compass North locked */}
-            <div className="w-10 h-7.5 flex items-center justify-center mb-2">
-              <svg width="40" height="30" viewBox="0 0 40 30" fill="none" className="text-teal-400">
-                <circle cx="20" cy="15" r="10" stroke="#475569" strokeWidth="1.5" />
-                <polygon points="20,7 23,15 20,13 17,15" fill="#ef4444" />
-                <polygon points="20,23 23,15 20,17 17,15" fill="#94a3b8" />
-                <text x="20" y="5" textAnchor="middle" fill="#ef4444" fontSize="5" fontWeight="bold">N</text>
-              </svg>
-            </div>
-            <strong
-              className={`text-xs font-bold leading-tight ${
-                cameraPreset === 'follow_north_up' ? 'text-teal-400' : 'text-slate-200'
-              }`}
-            >
-              Follow (North)
-            </strong>
-            <span className="text-[10px] text-slate-400 mt-1 leading-snug line-clamp-2">
-              North is always at the top
-            </span>
-          </button>
-
-          {/* Preset C: Whole Tour */}
+          {/* Preset B: Whole Tour */}
           <button
             type="button"
             onClick={() => {
@@ -193,7 +153,7 @@ export const CameraEditorPanel: React.FC<CameraEditorPanelProps> = ({
               onSetCameraMode('still');
               onSetTilt(10);
             }}
-            className={`flex flex-col items-center justify-center p-3 rounded-xl border text-center transition-all duration-200 cursor-pointer ${
+            className={`flex flex-col items-center justify-center p-3.5 rounded-xl border text-center transition-all duration-200 cursor-pointer ${
               cameraPreset === 'whole_tour'
                 ? 'bg-teal-500/10 border-teal-500 ring-2 ring-teal-500'
                 : 'bg-[#1e293b] border-slate-700 hover:border-teal-400'
@@ -311,117 +271,7 @@ export const CameraEditorPanel: React.FC<CameraEditorPanelProps> = ({
                 </>
               )}
 
-              {/* Tripod & Orbit preservation switch */}
-              <div className="pt-2 border-t border-slate-700/80 space-y-2">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wide">
-                  Director Rig Override
-                </span>
-                <div className="grid grid-cols-4 gap-1 text-[11px]">
-                  {(['follow', 'still', 'tripod', 'orbit'] as CameraMode[]).map((mode) => (
-                    <button
-                      key={mode}
-                      type="button"
-                      onClick={() => onSetCameraMode(mode)}
-                      className={`py-1 rounded capitalize font-medium transition-colors ${
-                        cameraMode === mode
-                          ? 'bg-teal-500 text-slate-950 font-bold'
-                          : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                      }`}
-                    >
-                      {mode}
-                    </button>
-                  ))}
-                </div>
 
-                {cameraMode === 'follow' && (
-                  <div className="space-y-1.5 pt-1 text-[11px]">
-                    <div className="flex items-center justify-between text-slate-300">
-                      <span>Orientation</span>
-                      <button
-                        type="button"
-                        onClick={() => onSetFollowOrient(followOrient === 'north' ? 'heading' : 'north')}
-                        className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-teal-400 rounded font-medium"
-                      >
-                        {followOrient === 'heading' ? 'Travel Direction' : 'North Up'}
-                      </button>
-                    </div>
-                    {followOrient === 'north' && onSetRotateOffset && (
-                      <div className="flex items-center justify-between text-slate-300">
-                        <span>Rotate Offset: {rotateOffset}°</span>
-                        <input
-                          type="range"
-                          min="-180"
-                          max="180"
-                          value={rotateOffset}
-                          onChange={(e) => onSetRotateOffset(parseInt(e.target.value, 10))}
-                          className="w-28 h-1 accent-teal-500"
-                        />
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {cameraMode === 'tripod' && (
-                  <div className="space-y-2 pt-1 text-[11px]">
-                    <div className="flex justify-between text-slate-300">
-                      <span>Tripod Distance: {distanceKm.toFixed(1)} km</span>
-                      <input
-                        type="range"
-                        min="0.1"
-                        max="10"
-                        step="0.1"
-                        value={distanceKm}
-                        onChange={(e) => onSetDistanceKm?.(parseFloat(e.target.value))}
-                        className="w-32 h-1 accent-teal-500"
-                      />
-                    </div>
-                    <div className="flex justify-between text-slate-300">
-                      <span>Tripod Height: {heightKm.toFixed(1)} km</span>
-                      <input
-                        type="range"
-                        min="0.1"
-                        max="10"
-                        step="0.1"
-                        value={heightKm}
-                        onChange={(e) => onSetHeightKm?.(parseFloat(e.target.value))}
-                        className="w-32 h-1 accent-teal-500"
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {cameraMode === 'orbit' && (
-                  <div className="space-y-2 pt-1 text-[11px]">
-                    <div className="flex justify-between items-center text-slate-300">
-                      <span>Orbit Direction</span>
-                      <div className="flex space-x-1">
-                        <button
-                          type="button"
-                          onClick={() => onSetOrbitDirection?.('clockwise')}
-                          className={`px-2 py-0.5 rounded text-[10px] ${
-                            orbitDirection === 'clockwise'
-                              ? 'bg-teal-500 text-slate-950 font-bold'
-                              : 'bg-slate-800 text-slate-300'
-                          }`}
-                        >
-                          Clockwise
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onSetOrbitDirection?.('anticlockwise')}
-                          className={`px-2 py-0.5 rounded text-[10px] ${
-                            orbitDirection === 'anticlockwise'
-                              ? 'bg-teal-500 text-slate-950 font-bold'
-                              : 'bg-slate-800 text-slate-300'
-                          }`}
-                        >
-                          Counter
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
             </div>
           )}
         </div>
@@ -633,6 +483,6 @@ export const CameraEditorPanel: React.FC<CameraEditorPanelProps> = ({
           <span>→</span>
         </button>
       </div>
-    </div>
+    </aside>
   );
 };

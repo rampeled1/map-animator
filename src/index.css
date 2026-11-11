@@ -28,3 +28,53 @@ body {
   font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   overflow-x: hidden;
 }
+
+/* Desktop & Tablet Drawer panel sizing (>= 768px) */
+@media (min-width: 768px) {
+  .panel {
+    width: 340px;
+    min-width: 340px;
+    max-width: 340px;
+    flex-shrink: 0;
+  }
+}
+
+/* Mobile bottom-sheet fluid panel sizing (< 768px, down to 320px) */
+@media (max-width: 767px) {
+  .panel {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    height: auto !important;
+    border-right: none !important;
+    overflow-y: visible !important;
+    padding: 14px 14px 20px !important;
+  }
+}
+
+/* Prevent horizontal overflow on HomePage at 320px */
+@media (max-width: 480px) {
+  .start {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .start button {
+    width: 100%;
+  }
+  .site-bar {
+    padding-inline: 12px !important;
+    gap: 8px !important;
+  }
+  .site-header nav {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}

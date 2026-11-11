@@ -18,6 +18,7 @@ import {
 
 interface SignsEditorPanelProps {
   signs: MapSign[];
+  routePoints?: { lng: number; lat: number }[];
   defaultCenter?: [number, number];
   onAddSign: (sign: MapSign) => void;
   onUpdateSign: (sign: MapSign) => void;
@@ -38,6 +39,7 @@ function readFileAsDataUrl(file: File): Promise<string> {
 
 export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
   signs,
+  routePoints,
   defaultCenter = [12.4964, 41.9028],
   onAddSign,
   onUpdateSign,
@@ -48,15 +50,30 @@ export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [draggedIdx, setDraggedIdx] = useState<number | null>(null);
 
+  // Determine fallback coordinate along the active route if available
+  const getFallbackLocation = (): [number, number] => {
+    if (routePoints && routePoints.length > 0) {
+      const fraction = (signs.length + 1) / (signs.length + 2);
+      const ptIdx = Math.min(
+        routePoints.length - 1,
+        Math.max(0, Math.floor(fraction * (routePoints.length - 1)))
+      );
+      return [routePoints[ptIdx].lng, routePoints[ptIdx].lat];
+    }
+    const jitter = (signs.length % 5) * 0.002;
+    return [defaultCenter[0] + jitter, defaultCenter[1] + jitter];
+  };
+
   const processPhotoFile = async (file: File) => {
     // Check for EXIF GPS tags
     const gps = await extractExifGps(file);
     const photoUrl = await readFileAsDataUrl(file);
+    const fallback = getFallbackLocation();
 
     const newSign: MapSign = {
       id: `sign-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      lng: gps ? gps.lng : defaultCenter[0],
-      lat: gps ? gps.lat : defaultCenter[1],
+      lng: gps ? gps.lng : fallback[0],
+      lat: gps ? gps.lat : fallback[1],
       text: file.name.replace(/\.[^/.]+$/, ''),
       style: 'photo',
       photoUrl,
@@ -87,12 +104,11 @@ export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
     else if (style === 'finish') defaultText = 'Finish';
     else if (style === 'hotel') defaultText = 'Hotel';
 
-    // Offset slightly if multiple signs are created at the same center
-    const jitter = (signs.length % 5) * 0.002;
+    const fallback = getFallbackLocation();
     const newSign: MapSign = {
       id: `sign-${Date.now()}`,
-      lng: defaultCenter[0] + jitter,
-      lat: defaultCenter[1] + jitter,
+      lng: fallback[0],
+      lat: fallback[1],
       text: defaultText,
       style,
       triggerMode: style === 'start' ? 'always' : 'onPassed',

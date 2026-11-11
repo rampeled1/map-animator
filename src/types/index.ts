@@ -1,3 +1,133 @@
+// --- Schema v2 Types ---
+
+export type CanonicalTransportType = 
+  | 'car' 
+  | 'walking' 
+  | 'bike' 
+  | 'train' 
+  | 'boat' 
+  | 'plane';
+
+export type RouteCalculationStatus = 
+  | 'idle' 
+  | 'calculating' 
+  | 'calculated' 
+  | 'stale' 
+  | 'error';
+
+export interface RouteStop {
+  id: string;
+  placeName: string;
+  customLabel: string;
+  showLabel: boolean;
+  lng: number;
+  lat: number;
+  ele?: number;
+  placeId?: string;
+  query?: string;
+}
+
+export interface ShapingPoint {
+  id: string;
+  lng: number;
+  lat: number;
+  ele?: number;
+}
+
+export interface RouteSegment {
+  id: string;
+  fromStopId: string;
+  toStopId: string;
+  transportType: CanonicalTransportType;
+  routingProfile?: 'driving' | 'cycling' | 'foot' | 'direct';
+  shapingPoints: ShapingPoint[];
+  use3dSymbol: boolean;
+  color?: string;
+  lineStyle?: 'solid' | 'dashed' | 'dotted';
+  status: RouteCalculationStatus;
+  distanceMeters?: number;
+  durationSeconds?: number;
+  geometry: RoutePoint[];
+  errorMessage?: string;
+}
+
+export interface CanonicalRoute {
+  id: string;
+  name: string;
+  status: RouteCalculationStatus;
+  color: string;
+  width: number;
+  style: 'solid' | 'dashed' | 'dotted';
+  hideLine?: boolean;
+  symbolScale?: number;
+  startOffsetSec?: number;
+  stops: RouteStop[];
+  segments: RouteSegment[];
+  calculatedGeometry: RoutePoint[];
+  stats?: RouteStats;
+}
+
+export type QuickPreviewSpeed = 'slow' | 'normal' | 'fast';
+export type QuickPreviewState = 'idle' | 'playing' | 'paused' | 'finished';
+
+export const QUICK_PREVIEW_BASE_SPEED_KMH = 60;
+export const QUICK_PREVIEW_SPEED_MULTIPLIERS: Record<QuickPreviewSpeed, number> = {
+  slow: 0.5,   // 30 km/h
+  normal: 1.0, // 60 km/h
+  fast: 2.0,   // 120 km/h
+};
+
+export interface QuickPreviewConfig {
+  state: QuickPreviewState;
+  speed: QuickPreviewSpeed;
+  progress: number; // 0 to 1 distance-normalized progress
+  remainingDistanceKm: number;
+}
+
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  updatedAt: number;
+  createdAt: number;
+  stopCount: number;
+  distanceKm: number;
+}
+
+export interface StoredBackup {
+  id: string;
+  projectId: string;
+  createdAt: number;
+  reason: string;
+  data: Uint8Array;
+}
+
+export interface BackupPayload {
+  version: 2;
+  createdAt: number;
+  projectId: string;
+  project: MapProject;
+  assets: Record<string, string>;
+}
+
+export interface IProjectStorage {
+  initialize(): Promise<void>;
+  listProjects(): Promise<ProjectSummary[]>;
+  loadProject(id: string): Promise<MapProject | null>;
+  saveProject(project: MapProject): Promise<void>;
+  deleteProject(id: string): Promise<void>;
+  saveAsset(projectId: string, assetId: string, blob: Blob): Promise<void>;
+  getAsset(assetId: string): Promise<Blob | null>;
+  deleteAsset(assetId: string): Promise<void>;
+  createBackup(projectId: string, reason: string): Promise<string>;
+  restoreBackup(backupId: string): Promise<MapProject>;
+  listBackups(projectId: string): Promise<Array<{ id: string; createdAt: number; reason: string }>>;
+  getDeviceId(): Promise<string>;
+  getHomeView(projectId: string): Promise<{ center: [number, number]; zoom: number; pitch: number; bearing: number } | null>;
+  setHomeView(projectId: string, view: { center: [number, number]; zoom: number; pitch: number; bearing: number }): Promise<void>;
+  exportProjectFile(id: string): Promise<Blob>;
+  importProjectFile(file: File): Promise<MapProject>;
+}
+
 export type StepId = 'route' | 'camera' | 'map' | 'line' | 'title' | 'signs' | 'overlays' | 'preview';
 export type UIMode = 'simple' | 'advanced';
 
@@ -146,6 +276,8 @@ export interface CameraBlock {
 export interface OverlayConfig {
   title?: string;
   subtitle?: string;
+  titleX?: number; // Position percentage within video frame (0 to 100)
+  titleY?: number; // Position percentage within video frame (0 to 100)
   showDistance: boolean;
   showAltitude: boolean;
   showSpeed: boolean;
@@ -176,7 +308,6 @@ export interface Scene {
   regions?: boolean;
   terrain?: boolean;
   camera?: SceneCamera;
-  routes: Route[];
   signs: MapSign[];
   cameraBlocks: CameraBlock[];
   overlays: OverlayConfig;
@@ -199,6 +330,7 @@ export interface CameraSettings {
 }
 
 export interface MapProject {
+  schemaVersion?: number;
   id: string;
   name: string;
   createdAt: number;
@@ -213,6 +345,7 @@ export interface MapProject {
   size: 480 | 720 | 1080 | 1440 | 2160;
   fps: 24 | 25 | 30 | 50 | 60; // Oct 18: 50 fps export
   includeMapCredit?: boolean; // Oct 30: Toggle map credit in video
+  routes?: CanonicalRoute[]; // Canonical route array (length === 1 in Schema v2)
   scenes: Scene[];
 }
 

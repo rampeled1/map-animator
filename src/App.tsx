@@ -1,89 +1,62 @@
 import React, { useState, useEffect } from 'react';
 import { HomePage } from './components/HomePage';
 import { EditorPage } from './components/EditorPage';
-import { MapProject, Route } from './types';
+import { MapProject } from './types';
 import { parseRouteFile } from './utils/gpxParser';
-
-const STORAGE_KEY = 'mapanimator_projects_v1';
+import { projectStorage, createNewProject } from './utils/indexedDbStorage';
 
 export const App: React.FC = () => {
-  const [projects, setProjects] = useState<MapProject[]>(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      return stored ? JSON.parse(stored) : [];
-    } catch {
-      return [];
-    }
-  });
-
+  const [projects, setProjects] = useState<MapProject[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [isStorageInitialized, setIsStorageInitialized] = useState(false);
 
-  // Sync projects to LocalStorage
+  // Initialize IndexedDB and perform clean-start
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(projects));
-    } catch (e) {
-      console.warn('Failed to save projects to storage:', e);
-    }
-  }, [projects]);
+    projectStorage
+      .initialize()
+      .then(async () => {
+        setIsStorageInitialized(true);
+        const list = await projectStorage.listProjects();
+        const loaded: MapProject[] = [];
+        for (const item of list) {
+          const p = await projectStorage.loadProject(item.id);
+          if (p) loaded.push(p);
+        }
+        setProjects(loaded);
+      })
+      .catch((err) => {
+        console.error('Storage initialization failed:', err);
+      });
+  }, []);
 
   const activeProject = projects.find((p) => p.id === activeProjectId);
 
-  const handleCreateProject = (name: string) => {
-    const newProj: MapProject = {
-      id: `proj-${Date.now()}`,
-      name,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      aspect: '16:9',
-      size: 1080,
-      fps: 30,
-      scenes: [
-        {
-          id: `scene-${Date.now()}`,
-          name: 'Scene 1',
-          duration: 15,
-          holdStartSec: 1,
-          holdEndSec: 2,
-          mapThemeId: 'liberty',
-          routes: [
-            {
-              id: `route-${Date.now()}`,
-              name: 'Main Route',
-              color: '#ff4d2e',
-              width: 8,
-              style: 'solid',
-              transportType: 'car',
-              legs: [],
-              points: [],
-            },
-          ],
-          signs: [],
-          cameraBlocks: [],
-          overlays: {
-            showDistance: true,
-            showAltitude: true,
-            showSpeed: true,
-            showElevationProfile: true,
-            showCompass: true,
-            unit: 'metric',
-            theme: 'dark',
-          },
-        },
-      ],
-    };
-
+  const handleCreateProject = async (name: string) => {
+    const summaries = await projectStorage.listProjects();
+    const newProj = createNewProject(summaries);
+    if (name.trim()) {
+      newProj.name = name.trim();
+    }
+    await projectStorage.saveProject(newProj);
     setProjects((prev) => [newProj, ...prev]);
     setActiveProjectId(newProj.id);
   };
 
   const handleUpdateProject = (updater: (prev: MapProject) => MapProject) => {
     setProjects((prev) =>
-      prev.map((p) => (p.id === activeProjectId ? updater(p) : p))
+      prev.map((p) => {
+        if (p.id === activeProjectId) {
+          const updated = updater(p);
+          projectStorage.saveProject(updated).catch(console.error);
+          return updated;
+        }
+        return p;
+      })
     );
   };
 
-  const handleDeleteProject = (id: string) => {
+  const handleDeleteProject = async (id: string) => {
+    await projectStorage.deleteProject(id);
     setProjects((prev) => prev.filter((p) => p.id !== id));
     if (activeProjectId === id) setActiveProjectId(null);
   };
@@ -105,39 +78,60 @@ export const App: React.FC = () => {
         return;
       }
 
-      const colors = ['#ff4d2e', '#ff9800', '#2196f3', '#4caf50', '#9c27b0', '#ffd600'];
-
       handleUpdateProject((prev) => {
+        const canonical = prev.routes?.[0];
+        const combinedGeometry = tracks.flatMap((t) => t.points);
+        const combinedStops = combinedGeometry.length >= 2 ? [
+          {
+            id: `stop-${Date.now()}-start`,
+            placeName: 'Start',
+            customLabel: 'Start',
+            showLabel: true,
+            lng: combinedGeometry[0].lng,
+            lat: combinedGeometry[0].lat,
+          },
+          {
+            id: `stop-${Date.now()}-dest`,
+            placeName: 'Destination',
+            customLabel: 'Destination',
+            showLabel: true,
+            lng: combinedGeometry[combinedGeometry.length - 1].lng,
+            lat: combinedGeometry[combinedGeometry.length - 1].lat,
+          }
+        ] : [];
+
+        const updatedRoute = {
+          ...canonical,
+          id: canonical?.id || `route-${Date.now()}`,
+          name: tracks[0]?.name || canonical?.name || 'Main Journey',
+          status: 'calculated' as const,
+          stops: combinedStops,
+          segments: combinedStops.length === 2 ? [
+            {
+              id: `seg-${Date.now()}`,
+              fromStopId: combinedStops[0].id,
+              toStopId: combinedStops[1].id,
+              transportType: 'car' as const,
+              shapingPoints: [],
+              use3dSymbol: true,
+              status: 'calculated' as const,
+              geometry: combinedGeometry,
+            }
+          ] : [],
+          calculatedGeometry: combinedGeometry,
+          stats: tracks[0]?.stats || canonical?.stats,
+        };
+
         const targetIdx = Math.min(Math.max(0, sceneIndex), prev.scenes.length - 1);
         const activeScene = prev.scenes[targetIdx];
-        const existingRoutes = activeScene.routes.filter((r) => r.points.length > 0);
-
-        const newRoutes: Route[] = tracks.map((t, idx) => ({
-          id: `route-${Date.now()}-${idx}`,
-          name: t.name || `Track ${existingRoutes.length + idx + 1}`,
-          color: colors[(existingRoutes.length + idx) % colors.length],
-          width: 8,
-          style: 'solid',
-          transportType: 'car',
-          legs: [],
-          points: t.points,
-          stats: t.stats,
-        }));
-
-        const mergedRoutes = [...existingRoutes, ...newRoutes].slice(0, 6);
         const mergedSigns = [...activeScene.signs, ...signs];
 
         return {
           ...prev,
           updatedAt: Date.now(),
+          routes: [updatedRoute as any],
           scenes: prev.scenes.map((scene, idx) =>
-            idx === targetIdx
-              ? {
-                  ...scene,
-                  routes: mergedRoutes.length > 0 ? mergedRoutes : scene.routes,
-                  signs: mergedSigns,
-                }
-              : scene
+            idx === targetIdx ? { ...scene, signs: mergedSigns } : scene
           ),
         };
       });
@@ -149,17 +143,21 @@ export const App: React.FC = () => {
 
   const handleImportProjectFile = async (file: File) => {
     try {
-      const text = await file.text();
-      const imported: MapProject = JSON.parse(text);
-      if (imported.id && imported.scenes) {
-        imported.id = `proj-${Date.now()}`;
-        setProjects((prev) => [imported, ...prev]);
-        setActiveProjectId(imported.id);
-      }
-    } catch {
-      alert('Could not open project file: invalid JSON');
+      const imported = await projectStorage.importProjectFile(file);
+      setProjects((prev) => [imported, ...prev]);
+      setActiveProjectId(imported.id);
+    } catch (err: any) {
+      alert(`Could not open project file: ${err?.message || 'Invalid format'}`);
     }
   };
+
+  if (!isStorageInitialized) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-gray-900 text-white">
+        <p className="text-lg">Initializing Map Animator storage...</p>
+      </div>
+    );
+  }
 
   if (activeProject) {
     return (

@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { MapProject } from '../types';
-import { exportProjectFile } from '../utils/projectStorage';
+import { projectStorage } from '../utils/indexedDbStorage';
 import { createPortal } from 'react-dom';
 
 interface HomePageProps {
@@ -196,9 +196,18 @@ export const HomePage: React.FC<HomePageProps> = ({
                             type="button"
                             className="p-1 text-[var(--muted)] hover:text-[var(--accent)] transition-colors"
                             title="Download project file (.mapanim)"
-                            onClick={(e) => {
+                            onClick={async (e) => {
                               e.stopPropagation();
-                              exportProjectFile(p);
+                              const blob = await projectStorage.exportProjectFile(p.id);
+                              const url = URL.createObjectURL(blob);
+                              const safeName = p.name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-') || 'project';
+                              const a = document.createElement('a');
+                              a.href = url;
+                              a.download = `${safeName}.mapanim`;
+                              document.body.appendChild(a);
+                              a.click();
+                              document.body.removeChild(a);
+                              URL.revokeObjectURL(url);
                             }}
                           >
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">

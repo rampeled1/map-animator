@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Route, RouteLeg, TransportType, UIMode, DestinationPreview } from '../types';
+import { Route, RouteLeg, UIMode, DestinationPreview, CanonicalRoute, RouteStop, RouteSegment, CanonicalTransportType, RouteCalculationStatus, RoutePoint, QuickPreviewSpeed, QuickPreviewState } from '../types';
 import {
   SnapProfile,
   PlaceSuggestion,
@@ -7,7 +7,6 @@ import {
   buildJourneyFromStops,
 } from '../utils/roadRouter';
 import { ElevationProfileChart } from './ElevationProfileChart';
-import { ALL_TRANSPORTS, TRANSPORT_CATEGORIES, TransportMeta } from '../constants/transports';
 import { calculateTrackStats } from '../utils/gpxParser';
 import { chaikinSmooth } from '../utils/routeSmoothing';
 import {
@@ -17,14 +16,9 @@ import {
   Car,
   Bike,
   Footprints,
-  Compass,
   Plane,
   Ship,
   Train,
-  Shield,
-  Waves,
-  Truck,
-  Bus,
   ArrowUpDown,
   EyeOff,
   MoreHorizontal,
@@ -35,10 +29,17 @@ import {
   MapPin,
   Navigation,
   Loader2,
+  Play,
+  Pause,
+  RotateCcw,
+  AlertTriangle,
 } from 'lucide-react';
+
+import { CANONICAL_TRANSPORTS as CANONICAL_META, getRoutingProfileForTransport } from '../constants/canonicalTransports';
 
 interface RouteEditorPanelProps {
   routes: Route[];
+  canonicalRoute?: CanonicalRoute;
   activeRouteId: string;
   uiMode?: UIMode;
   snapProfile: SnapProfile;
@@ -49,11 +50,23 @@ interface RouteEditorPanelProps {
   onAddRoute: () => void;
   onDuplicateRoute?: (route: Route) => void;
   onFitRoute?: (route: Route) => void;
-  onUpdateRoute: (route: Route) => void;
+  onUpdateRoute: (route: Route, skipUndo?: boolean) => void;
+  onUpdateCanonicalRoute?: (canonical: CanonicalRoute, isCalculationResult?: boolean) => void;
   onDeleteRoute?: (id: string) => void;
   onImportGPX: (file: File, options?: { importWaypoints: boolean; createDayEndSigns: boolean }) => void;
   onPreviewDestination?: (dest: DestinationPreview | null) => void;
   onNext?: () => void;
+  quickPreviewState?: QuickPreviewState;
+  quickPreviewProgress?: number;
+  quickPreviewSpeed?: QuickPreviewSpeed;
+  onStartQuickPreview?: () => void;
+  onPauseQuickPreview?: () => void;
+  onResumeQuickPreview?: () => void;
+  onRestartQuickPreview?: () => void;
+  onStopQuickPreview?: () => void;
+  onSetQuickPreviewSpeed?: (speed: QuickPreviewSpeed) => void;
+  onSeekQuickPreview?: (progress: number) => void;
+  remainingDistanceKm?: number;
 }
 
 interface JourneyStop {
@@ -62,33 +75,25 @@ interface JourneyStop {
   selectedPlace?: PlaceSuggestion | null;
 }
 
-const SIMPLE_TRANSPORTS: { id: TransportType; label: string; icon: React.ReactNode; snap: SnapProfile }[] = [
-  { id: 'car', label: 'Car', icon: <Car className="w-5 h-5" />, snap: 'driving' },
-  { id: 'walking', label: 'Walk', icon: <Footprints className="w-5 h-5" />, snap: 'walking' },
-  { id: 'plane', label: 'Plane', icon: <Plane className="w-5 h-5" />, snap: 'off' },
-  { id: 'bicycle', label: 'Bike', icon: <Bike className="w-5 h-5" />, snap: 'cycling' },
-  { id: 'train', label: 'Train', icon: <Train className="w-5 h-5" />, snap: 'driving' },
-  { id: 'boat', label: 'Boat', icon: <Ship className="w-5 h-5" />, snap: 'off' },
-];
-
-const getCategoryIcon = (iconName: string) => {
-  switch (iconName) {
-    case 'Car': return <Car className="w-3.5 h-3.5" />;
-    case 'Bike': return <Bike className="w-3.5 h-3.5" />;
-    case 'Footprints': return <Footprints className="w-3.5 h-3.5" />;
-    case 'Plane': return <Plane className="w-3.5 h-3.5" />;
-    case 'Ship': return <Ship className="w-3.5 h-3.5" />;
-    case 'Train': return <Train className="w-3.5 h-3.5" />;
-    case 'Shield': return <Shield className="w-3.5 h-3.5" />;
-    case 'Waves': return <Waves className="w-3.5 h-3.5" />;
-    case 'Truck': return <Truck className="w-3.5 h-3.5" />;
-    case 'Bus': return <Bus className="w-3.5 h-3.5" />;
-    default: return <Compass className="w-3.5 h-3.5" />;
-  }
+const ICONS: Record<CanonicalTransportType, React.ReactNode> = {
+  car: <Car className="w-5 h-5" />,
+  walking: <Footprints className="w-5 h-5" />,
+  bike: <Bike className="w-5 h-5" />,
+  train: <Train className="w-5 h-5" />,
+  boat: <Ship className="w-5 h-5" />,
+  plane: <Plane className="w-5 h-5" />,
 };
+
+export const CANONICAL_TRANSPORTS = CANONICAL_META.map((meta) => ({
+  ...meta,
+  icon: ICONS[meta.id],
+}));
+
+const SIMPLE_TRANSPORTS = CANONICAL_TRANSPORTS;
 
 export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
   routes,
+  canonicalRoute,
   activeRouteId,
   uiMode = 'simple',
   snapProfile,
@@ -100,58 +105,160 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
   onDuplicateRoute,
   onFitRoute,
   onUpdateRoute,
+  onUpdateCanonicalRoute,
   onDeleteRoute,
   onImportGPX,
   onPreviewDestination,
   onNext,
+  quickPreviewState = 'idle',
+  quickPreviewProgress = 0,
+  quickPreviewSpeed = 'normal',
+  onStartQuickPreview,
+  onPauseQuickPreview,
+  onResumeQuickPreview,
+  onRestartQuickPreview,
+  onStopQuickPreview,
+  onSetQuickPreviewSpeed,
+  onSeekQuickPreview,
+  remainingDistanceKm,
 }) => {
   const activeRoute = routes.find((r) => r.id === activeRouteId) || routes[0];
-  const [activeCategory, setActiveCategory] = useState<TransportMeta['category']>('road');
   const [importWaypoints, setImportWaypoints] = useState(true);
   const [createDayEndSigns, setCreateDayEndSigns] = useState(true);
   const [routeMenuOpen, setRouteMenuOpen] = useState(false);
+  const [isRenamingRoute, setIsRenamingRoute] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
   const [showAdvancedTools, setShowAdvancedTools] = useState(uiMode === 'advanced');
 
-  // Simple Journey Builder State
-  const [stops, setStops] = useState<JourneyStop[]>([
-    {
-      id: 'stop-start',
-      query: 'Baku, Azerbaijan',
-      selectedPlace: {
-        id: 'baku',
-        name: 'Baku',
-        context: 'Azerbaijan',
-        fullName: 'Baku, Azerbaijan',
-        lng: 49.8671,
-        lat: 40.4093,
+  // Initialize Journey Stops from canonicalRoute.stops if present
+  const [stops, setStops] = useState<JourneyStop[]>(() => {
+    if (canonicalRoute && canonicalRoute.stops && canonicalRoute.stops.length >= 2) {
+      return canonicalRoute.stops.map((s) => ({
+        id: s.id,
+        query: s.customLabel || s.placeName || s.query || '',
+        selectedPlace: {
+          id: s.placeId || s.id,
+          name: s.placeName,
+          context: '',
+          fullName: s.customLabel || s.placeName,
+          lng: s.lng,
+          lat: s.lat,
+        },
+      }));
+    }
+    return [
+      {
+        id: 'stop-start',
+        query: '',
+        selectedPlace: null,
       },
-    },
-    {
-      id: 'stop-end',
-      query: 'Laza, Azerbaijan',
-      selectedPlace: {
-        id: 'laza',
-        name: 'Laza',
-        context: 'Qusar, Azerbaijan',
-        fullName: 'Laza, Azerbaijan',
-        lng: 48.1156,
-        lat: 41.2969,
+      {
+        id: 'stop-end',
+        query: '',
+        selectedPlace: null,
       },
-    },
-  ]);
+    ];
+  });
+  const [selectedSegmentIndex, setSelectedSegmentIndex] = useState<number>(0);
   const [activeStopAutocomplete, setActiveStopAutocomplete] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<PlaceSuggestion[]>([]);
   const [isBuildingRoute, setIsBuildingRoute] = useState(false);
   const searchAbortRef = useRef<AbortController | null>(null);
+  const isUserTypingRef = useRef(false);
+
+  // Sync stops when switching projects or canonical routes
+  useEffect(() => {
+    if (isUserTypingRef.current) return;
+    if (canonicalRoute?.stops && canonicalRoute.stops.length >= 2) {
+      setStops(
+        canonicalRoute.stops.map((s) => ({
+          id: s.id,
+          query: s.customLabel || s.placeName || s.query || '',
+          selectedPlace: !isNaN(s.lng) && !isNaN(s.lat) && (s.lng !== 0 || s.lat !== 0)
+            ? {
+                id: s.placeId || s.id,
+                name: s.placeName,
+                context: '',
+                fullName: s.customLabel || s.placeName,
+                lng: s.lng,
+                lat: s.lat,
+              }
+            : null,
+        }))
+      );
+    }
+  }, [canonicalRoute?.id, canonicalRoute?.stops]);
+
+  const handleSelectTransport = (tId: CanonicalTransportType, snap: SnapProfile, targetSegmentIndex?: number) => {
+    onSetSnapProfile(snap);
+    onUpdateRoute({ ...activeRoute, transportType: tId as any });
+    if (canonicalRoute && onUpdateCanonicalRoute) {
+      const segIdx = targetSegmentIndex !== undefined ? targetSegmentIndex : selectedSegmentIndex;
+      const currentSegments = canonicalRoute.segments || [];
+      const updatedSegments: RouteSegment[] = currentSegments.map((seg, idx) => {
+        // ONLY update the selected segment! Preserve every other segment's transportType and routingProfile!
+        if (idx === segIdx || (currentSegments.length <= 1 && segIdx === 0)) {
+          return {
+            ...seg,
+            transportType: tId,
+            status: 'stale',
+            routingProfile: getRoutingProfileForTransport(tId),
+          };
+        }
+        return seg;
+      });
+      onUpdateCanonicalRoute({
+        ...canonicalRoute,
+        status: 'stale',
+        segments: updatedSegments,
+      });
+    }
+  };
 
   useEffect(() => {
     setShowAdvancedTools(uiMode === 'advanced');
   }, [uiMode]);
 
+  const syncCanonicalStops = (updatedStops: JourneyStop[]) => {
+    if (!canonicalRoute || !onUpdateCanonicalRoute) return;
+    const mappedStops: RouteStop[] = updatedStops.map((s, idx) => {
+      const prevStop = canonicalRoute.stops?.find((ps) => ps.id === s.id) || canonicalRoute.stops?.[idx];
+      let resolvedLng: number = Number.NaN;
+      let resolvedLat: number = Number.NaN;
+
+      if (s.selectedPlace) {
+        resolvedLng = s.selectedPlace.lng;
+        resolvedLat = s.selectedPlace.lat;
+      } else if (prevStop && !isNaN(prevStop.lng) && !isNaN(prevStop.lat) && (prevStop.lng !== 0 || prevStop.lat !== 0)) {
+        resolvedLng = prevStop.lng;
+        resolvedLat = prevStop.lat;
+      }
+
+      return {
+        id: s.id.startsWith('stop-') ? s.id : `stop-${Date.now()}-${idx}`,
+        placeName: s.selectedPlace?.name || s.query || '',
+        customLabel: s.selectedPlace?.fullName || s.query || '',
+        showLabel: true,
+        lng: resolvedLng,
+        lat: resolvedLat,
+        placeId: s.selectedPlace?.id || prevStop?.placeId,
+        query: s.query,
+      };
+    });
+    onUpdateCanonicalRoute({
+      ...canonicalRoute,
+      status: 'stale',
+      stops: mappedStops,
+    });
+  };
+
   const handleStopQueryChange = async (stopId: string, value: string) => {
-    setStops((prev) =>
-      prev.map((s) => (s.id === stopId ? { ...s, query: value, selectedPlace: null } : s))
-    );
+    isUserTypingRef.current = true;
+    setStops((prev) => {
+      const next = prev.map((s) => (s.id === stopId ? { ...s, query: value, selectedPlace: null } : s));
+      syncCanonicalStops(next);
+      return next;
+    });
     setActiveStopAutocomplete(stopId);
 
     if (searchAbortRef.current) {
@@ -169,11 +276,13 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
   };
 
   const handleSelectSuggestion = (stopId: string, place: PlaceSuggestion) => {
-    setStops((prev) =>
-      prev.map((s) =>
+    setStops((prev) => {
+      const next = prev.map((s) =>
         s.id === stopId ? { ...s, query: place.fullName, selectedPlace: place } : s
-      )
-    );
+      );
+      syncCanonicalStops(next);
+      return next;
+    });
     setActiveStopAutocomplete(null);
     setSuggestions([]);
 
@@ -196,16 +305,24 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
       selectedPlace: null,
     };
     // Insert before destination
-    setStops((prev) => [
-      ...prev.slice(0, Math.max(1, prev.length - 1)),
-      newStop,
-      prev[prev.length - 1],
-    ]);
+    setStops((prev) => {
+      const next = [
+        ...prev.slice(0, Math.max(1, prev.length - 1)),
+        newStop,
+        prev[prev.length - 1],
+      ];
+      syncCanonicalStops(next);
+      return next;
+    });
   };
 
   const handleRemoveStop = (stopId: string) => {
     if (stops.length <= 2) return;
-    setStops((prev) => prev.filter((s) => s.id !== stopId));
+    setStops((prev) => {
+      const next = prev.filter((s) => s.id !== stopId);
+      syncCanonicalStops(next);
+      return next;
+    });
   };
 
   const handleCreateJourney = async () => {
@@ -213,39 +330,122 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
     setIsBuildingRoute(true);
     try {
       const resolvedCoords: { lng: number; lat: number; name: string }[] = [];
-      for (const s of stops) {
+      for (let i = 0; i < stops.length; i++) {
+        const s = stops[i];
         if (s.selectedPlace) {
           resolvedCoords.push({
             lng: s.selectedPlace.lng,
             lat: s.selectedPlace.lat,
             name: s.selectedPlace.name,
           });
-        } else if (s.query.trim()) {
-          const matches = await searchPlaceSuggestions(s.query);
-          if (matches.length > 0) {
+        } else {
+          // Check if previous canonical stop had valid non-zero coordinates
+          const prevStop = canonicalRoute?.stops?.[i];
+          if (prevStop && !isNaN(prevStop.lng) && !isNaN(prevStop.lat) && (prevStop.lng !== 0 || prevStop.lat !== 0)) {
             resolvedCoords.push({
-              lng: matches[0].lng,
-              lat: matches[0].lat,
-              name: matches[0].name,
+              lng: prevStop.lng,
+              lat: prevStop.lat,
+              name: prevStop.placeName,
             });
+          } else if (s.query.trim()) {
+            const matches = await searchPlaceSuggestions(s.query);
+            if (matches.length > 0) {
+              resolvedCoords.push({
+                lng: matches[0].lng,
+                lat: matches[0].lat,
+                name: matches[0].name,
+              });
+            }
           }
         }
       }
 
-      if (resolvedCoords.length >= 2) {
-        const transport = activeRoute.transportType || 'car';
-        const journeyPoints = await buildJourneyFromStops(resolvedCoords, transport);
-        const stats = calculateTrackStats(journeyPoints);
-        const journeyName = `${resolvedCoords[0].name} → ${resolvedCoords[resolvedCoords.length - 1].name}`;
-        const updatedRoute: Route = {
-          ...activeRoute,
-          name: journeyName,
-          points: journeyPoints,
-          stats,
-        };
-        onUpdateRoute(updatedRoute);
-        onFitRoute?.(updatedRoute);
+      // Check for unresolved stops: if any stop could not be resolved, PREVENT CALCULATION!
+      if (resolvedCoords.length < stops.length || resolvedCoords.length < 2) {
+        setIsBuildingRoute(false);
+        const unresolvedIdx = stops.findIndex((_, idx) => !resolvedCoords[idx]);
+        const stopLabel = unresolvedIdx === 0 ? 'Start' : unresolvedIdx === stops.length - 1 ? 'Destination' : `Stop #${unresolvedIdx + 1}`;
+        alert(`Cannot create journey: ${stopLabel} is unresolved. Please select a valid place from the suggestions.`);
+        return;
       }
+
+      // Build per-segment transport array preserving each segment's chosen mode
+      const segmentTransports: CanonicalTransportType[] = [];
+      for (let i = 0; i < resolvedCoords.length - 1; i++) {
+        const existingSeg = canonicalRoute?.segments?.[i];
+        segmentTransports.push(existingSeg?.transportType || (activeRoute.transportType as CanonicalTransportType) || 'car');
+      }
+
+      let journeyPoints: RoutePoint[] = [];
+      let calculationSucceeded = false;
+      try {
+        journeyPoints = await buildJourneyFromStops(resolvedCoords, segmentTransports);
+        calculationSucceeded = Array.isArray(journeyPoints) && journeyPoints.length >= 2;
+      } catch {
+        calculationSucceeded = false;
+      }
+
+      // Approved Staged Calculation Policy:
+      // - On success: commit new geometry and set status 'calculated'
+      // - On failure: discard incomplete staged result, preserve previous successful geometry, and mark status 'stale'
+      const previousGeometry = canonicalRoute?.calculatedGeometry || activeRoute.points || [];
+      const finalGeometry = calculationSucceeded ? journeyPoints : previousGeometry;
+      const calculationStatus: RouteCalculationStatus = calculationSucceeded ? 'calculated' : 'stale';
+
+      const stats = calculateTrackStats(finalGeometry);
+      const journeyName = `${resolvedCoords[0].name} → ${resolvedCoords[resolvedCoords.length - 1].name}`;
+
+      // Construct Canonical Route Stops and Segments
+      const canonicalStops: RouteStop[] = resolvedCoords.map((c, idx) => ({
+        id: canonicalRoute?.stops?.[idx]?.id || `stop-${Date.now()}-${idx}`,
+        placeName: c.name,
+        customLabel: c.name,
+        showLabel: true,
+        lng: c.lng,
+        lat: c.lat,
+      }));
+
+      const canonicalSegments: RouteSegment[] = [];
+      for (let i = 0; i < canonicalStops.length - 1; i++) {
+        const segTransport = segmentTransports[i];
+        canonicalSegments.push({
+          id: canonicalRoute?.segments?.[i]?.id || `seg-${Date.now()}-${i}`,
+          fromStopId: canonicalStops[i].id,
+          toStopId: canonicalStops[i + 1].id,
+          transportType: segTransport,
+          routingProfile: getRoutingProfileForTransport(segTransport),
+          shapingPoints: [],
+          use3dSymbol: true,
+          status: calculationStatus,
+          geometry: finalGeometry,
+        });
+      }
+
+      if (onUpdateCanonicalRoute) {
+        onUpdateCanonicalRoute({
+          id: canonicalRoute?.id || activeRoute.id,
+          name: journeyName,
+          status: calculationStatus,
+          color: activeRoute.color,
+          width: activeRoute.width,
+          style: activeRoute.style,
+          stops: canonicalStops,
+          segments: canonicalSegments,
+          calculatedGeometry: finalGeometry,
+          stats,
+        }, true);
+      }
+
+      const updatedRoute: Route = {
+        ...activeRoute,
+        name: journeyName,
+        points: finalGeometry,
+        stats,
+      };
+      onUpdateRoute(updatedRoute, true);
+      onFitRoute?.(updatedRoute);
+    } catch (err) {
+      console.error('Journey creation error:', err);
     } finally {
       setIsBuildingRoute(false);
     }
@@ -264,6 +464,17 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
     if (!activeRoute || activeRoute.points.length < 2) return;
     const reversedPoints = [...activeRoute.points].reverse();
     const updatedStats = calculateTrackStats(reversedPoints);
+
+    if (onUpdateCanonicalRoute && canonicalRoute) {
+      const reversedStops = canonicalRoute.stops ? [...canonicalRoute.stops].reverse() : [];
+      onUpdateCanonicalRoute({
+        ...canonicalRoute,
+        stops: reversedStops,
+        calculatedGeometry: reversedPoints,
+        stats: updatedStats,
+      });
+    }
+
     onUpdateRoute({
       ...activeRoute,
       points: reversedPoints,
@@ -273,10 +484,16 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
 
   const handleRenameRoute = () => {
     setRouteMenuOpen(false);
-    const newName = prompt('Rename route:', activeRoute.name);
-    if (newName && newName.trim()) {
-      onUpdateRoute({ ...activeRoute, name: newName.trim() });
+    if (!activeRoute) return;
+    setRenameValue(activeRoute.name);
+    setIsRenamingRoute(true);
+  };
+
+  const handleConfirmRename = () => {
+    if (activeRoute && renameValue.trim()) {
+      onUpdateRoute({ ...activeRoute, name: renameValue.trim() });
     }
+    setIsRenamingRoute(false);
   };
 
   const handleDuplicateRoute = () => {
@@ -310,7 +527,7 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
     const newLeg: RouteLeg = {
       id: `leg-${Date.now()}`,
       fromPointIndex: defaultFromIdx,
-      transportType: 'ferry',
+      transportType: 'boat',
       use3dSymbol: true,
       color: activeRoute.color,
     };
@@ -318,6 +535,12 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
       ...activeRoute,
       legs: [...currentLegs, newLeg],
     });
+    if (canonicalRoute && onUpdateCanonicalRoute) {
+      onUpdateCanonicalRoute({
+        ...canonicalRoute,
+        status: 'stale',
+      });
+    }
   };
 
   const handleUpdateLeg = (legId: string, patch: Partial<RouteLeg>) => {
@@ -326,6 +549,12 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
       ...activeRoute,
       legs: (activeRoute.legs || []).map((l) => (l.id === legId ? { ...l, ...patch } : l)),
     });
+    if (canonicalRoute && onUpdateCanonicalRoute) {
+      onUpdateCanonicalRoute({
+        ...canonicalRoute,
+        status: 'stale',
+      });
+    }
   };
 
   const handleDeleteLeg = (legId: string) => {
@@ -334,6 +563,12 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
       ...activeRoute,
       legs: (activeRoute.legs || []).filter((l) => l.id !== legId),
     });
+    if (canonicalRoute && onUpdateCanonicalRoute) {
+      onUpdateCanonicalRoute({
+        ...canonicalRoute,
+        status: 'stale',
+      });
+    }
   };
 
   const handleSimplifyRoute = (targetCount: number) => {
@@ -353,8 +588,6 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
       stats: updatedStats,
     });
   };
-
-  const filteredTransports = ALL_TRANSPORTS.filter((t) => t.category === activeCategory);
 
   return (
     <aside className="panel w-85 h-full overflow-y-auto p-5 flex flex-col space-y-5 text-xs bg-[#0f172a] border-r border-slate-800 text-slate-100">
@@ -412,13 +645,22 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
                 type="text"
                 value={stop.query}
                 onFocus={() => {
+                  isUserTypingRef.current = true;
                   setActiveStopAutocomplete(stop.id);
                   if (stop.query.trim().length >= 2) {
                     handleStopQueryChange(stop.id, stop.query);
                   }
                 }}
+                onBlur={() => {
+                  setTimeout(() => {
+                    isUserTypingRef.current = false;
+                    setActiveStopAutocomplete(null);
+                  }, 200);
+                }}
                 onKeyDown={async (e) => {
-                  if (e.key === 'Enter') {
+                  if (e.key === 'Escape') {
+                    setActiveStopAutocomplete(null);
+                  } else if (e.key === 'Enter') {
                     e.preventDefault();
                     if (suggestions.length > 0) {
                       handleSelectSuggestion(stop.id, suggestions[0]);
@@ -437,17 +679,29 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
 
               {/* Autocomplete Dropdown */}
               {activeStopAutocomplete === stop.id && suggestions.length > 0 && (
-                <div className="absolute left-0 right-0 top-full mt-1 bg-[#0f172a] border border-slate-700 rounded-xl shadow-2xl z-40 overflow-hidden">
+                <div className="absolute left-0 right-0 top-full mt-1.5 bg-[#0f172a]/95 backdrop-blur-md border border-slate-700/80 rounded-xl shadow-2xl z-50 max-h-56 overflow-y-auto divide-y divide-slate-800/80">
                   {suggestions.map((sug) => (
                     <button
                       key={sug.id}
                       type="button"
-                      onClick={() => handleSelectSuggestion(stop.id, sug)}
-                      className="w-full px-3 py-2 text-left hover:bg-teal-500/15 flex items-center justify-between text-xs border-b border-slate-800/60 last:border-none"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        handleSelectSuggestion(stop.id, sug);
+                      }}
+                      className="w-full px-3.5 py-2.5 text-left hover:bg-teal-500/15 flex items-center justify-between text-xs transition-colors cursor-pointer group"
                     >
-                      <span className="font-semibold text-slate-200">{sug.name}</span>
-                      <span className="text-[10px] text-slate-400 truncate ml-2">
-                        {sug.context}
+                      <div className="flex flex-col min-w-0 pr-2">
+                        <span className="font-bold text-slate-100 group-hover:text-teal-300 truncate">
+                          {sug.name}
+                        </span>
+                        {sug.context && (
+                          <span className="text-[10px] text-slate-400 group-hover:text-slate-300 truncate mt-0.5">
+                            {sug.context}
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[10px] text-slate-500 font-mono shrink-0">
+                        {sug.lat.toFixed(2)}°, {sug.lng.toFixed(2)}°
                       </span>
                     </button>
                   ))}
@@ -470,19 +724,52 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
       {/* 3. How are you travelling? */}
       {activeRoute && (
         <div className="space-y-2.5">
-          <span className="text-[11px] font-bold text-teal-400 tracking-wider uppercase block">
-            HOW ARE YOU TRAVELLING?
-          </span>
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-bold text-teal-400 tracking-wider uppercase block">
+              HOW ARE YOU TRAVELLING?
+            </span>
+            {canonicalRoute?.segments && canonicalRoute.segments.length > 1 && (
+              <span className="text-[10px] text-slate-400">
+                Editing Leg {selectedSegmentIndex + 1} of {canonicalRoute.segments.length}
+              </span>
+            )}
+          </div>
+
+          {/* Segment selector if multi-segment */}
+          {canonicalRoute?.segments && canonicalRoute.segments.length > 1 && (
+            <div className="flex items-center space-x-1.5 overflow-x-auto pb-1 scrollbar-none">
+              {canonicalRoute.segments.map((seg, sIdx) => {
+                const fromName = canonicalRoute.stops?.find((s) => s.id === seg.fromStopId)?.placeName || `Stop ${sIdx + 1}`;
+                const toName = canonicalRoute.stops?.find((s) => s.id === seg.toStopId)?.placeName || `Stop ${sIdx + 2}`;
+                const isSegActive = selectedSegmentIndex === sIdx;
+                return (
+                  <button
+                    key={seg.id}
+                    type="button"
+                    onClick={() => setSelectedSegmentIndex(sIdx)}
+                    className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold border transition-all whitespace-nowrap cursor-pointer ${
+                      isSegActive
+                        ? 'border-teal-500 bg-teal-500/15 text-teal-300 shadow-sm'
+                        : 'border-slate-700 bg-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Leg {sIdx + 1}: {fromName} → {toName} ({seg.transportType})
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
           <div className="grid grid-cols-3 gap-2">
             {SIMPLE_TRANSPORTS.map((item) => {
-              const isSelected = (activeRoute.transportType || 'car') === item.id;
+              const currentTransport = canonicalRoute?.segments?.[selectedSegmentIndex]?.transportType || activeRoute.transportType || 'car';
+              const isSelected = currentTransport === item.id;
               return (
                 <button
                   key={item.id}
                   type="button"
                   onClick={() => {
-                    onSetSnapProfile(item.snap);
-                    onUpdateRoute({ ...activeRoute, transportType: item.id });
+                    handleSelectTransport(item.id, item.snap, selectedSegmentIndex);
                   }}
                   className={`p-3 rounded-xl border flex flex-col items-center justify-center space-y-1.5 transition-all duration-200 cursor-pointer ${
                     isSelected
@@ -501,26 +788,192 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
 
       {/* 4. Create My Route Primary CTA */}
       <div className="space-y-2">
-        <button
-          type="button"
-          disabled={isBuildingRoute}
-          onClick={handleCreateJourney}
-          className="w-full py-3 px-4 rounded-xl bg-teal-500 hover:bg-teal-400 disabled:opacity-50 text-slate-950 font-extrabold text-sm shadow-lg shadow-teal-500/20 transition-all flex items-center justify-center space-x-2 cursor-pointer"
-        >
-          {isBuildingRoute ? (
-            <>
-              <Loader2 className="w-4 h-4 animate-spin" />
-              <span>Finding the best route...</span>
-            </>
-          ) : (
-            <>
-              <Navigation className="w-4 h-4" />
-              <span>Create my route →</span>
-            </>
-          )}
-        </button>
+        {canonicalRoute?.status === 'stale' && (
+          <div
+            data-testid="route-stale-badge"
+            className="flex items-center space-x-2 px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs"
+          >
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>Route modified — recalculation needed to refresh preview</span>
+          </div>
+        )}
 
-        {activeRoute && activeRoute.points.length >= 2 && (
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            disabled={isBuildingRoute}
+            onClick={handleCreateJourney}
+            className="py-3 px-3 rounded-xl bg-teal-500 hover:bg-teal-400 disabled:opacity-50 text-slate-950 font-extrabold text-xs shadow-lg shadow-teal-500/20 transition-all flex items-center justify-center space-x-1.5 cursor-pointer"
+          >
+            {isBuildingRoute ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Finding route...</span>
+              </>
+            ) : (
+              <>
+                <Navigation className="w-4 h-4" />
+                <span>Create my route →</span>
+              </>
+            )}
+          </button>
+
+          <button
+            type="button"
+            data-testid="preview-route-btn"
+            disabled={
+              isBuildingRoute ||
+              canonicalRoute?.status !== 'calculated' ||
+              !activeRoute ||
+              activeRoute.points.length < 2
+            }
+            onClick={() => {
+              if (quickPreviewState === 'playing') {
+                onPauseQuickPreview?.();
+              } else if (quickPreviewState === 'paused') {
+                onResumeQuickPreview?.();
+              } else if (quickPreviewState === 'finished') {
+                onRestartQuickPreview?.();
+              } else {
+                onStartQuickPreview?.();
+              }
+            }}
+            className="py-3 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:hover:bg-slate-800 text-teal-300 border border-teal-500/30 font-bold text-xs transition-all flex items-center justify-center space-x-1.5 cursor-pointer"
+          >
+            {quickPreviewState === 'playing' ? (
+              <>
+                <Pause className="w-4 h-4" />
+                <span>Pause</span>
+              </>
+            ) : quickPreviewState === 'paused' ? (
+              <>
+                <Play className="w-4 h-4" />
+                <span>Resume</span>
+              </>
+            ) : (
+              <>
+                <Play className="w-4 h-4" />
+                <span>Preview</span>
+              </>
+            )}
+          </button>
+        </div>
+
+        {quickPreviewState !== 'idle' && (
+          <div
+            data-testid="quick-preview-toolbar"
+            className="p-3.5 rounded-xl bg-slate-900 border border-teal-500/40 shadow-xl space-y-3"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <span className="w-2 h-2 rounded-full bg-teal-400 animate-pulse" />
+                <span className="font-extrabold text-xs text-slate-200 uppercase tracking-wider">
+                  Quick Route Preview
+                </span>
+              </div>
+              <button
+                type="button"
+                data-testid="exit-preview-btn"
+                onClick={onStopQuickPreview}
+                className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-slate-300 hover:text-white border border-slate-700 transition-colors cursor-pointer"
+              >
+                Exit Preview
+              </button>
+            </div>
+
+            {/* Scrubber progress slider */}
+            <div className="space-y-1">
+              <div className="flex justify-between text-[11px] text-slate-400 font-mono">
+                <span>{Math.round((quickPreviewProgress || 0) * 100)}%</span>
+                <span>{remainingDistanceKm !== undefined ? `${remainingDistanceKm.toFixed(1)} km left` : ''}</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.001}
+                value={quickPreviewProgress || 0}
+                onChange={(e) => onSeekQuickPreview?.(parseFloat(e.target.value))}
+                className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-teal-400"
+              />
+            </div>
+
+            {/* Playback & Speed Controls */}
+            <div className="flex items-center justify-between pt-1">
+              <div className="flex items-center space-x-1.5">
+                {quickPreviewState === 'playing' ? (
+                  <button
+                    type="button"
+                    data-testid="preview-pause-btn"
+                    onClick={onPauseQuickPreview}
+                    className="p-2 rounded-lg bg-teal-500 text-slate-950 font-bold hover:bg-teal-400 transition-colors cursor-pointer"
+                    title="Pause"
+                  >
+                    <Pause className="w-4 h-4" />
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    data-testid="preview-play-btn"
+                    onClick={() => {
+                      if (quickPreviewState === 'finished') {
+                        onRestartQuickPreview?.();
+                      } else if (quickPreviewState === 'paused') {
+                        onResumeQuickPreview?.();
+                      } else {
+                        onStartQuickPreview?.();
+                      }
+                    }}
+                    className="p-2 rounded-lg bg-teal-500 text-slate-950 font-bold hover:bg-teal-400 transition-colors cursor-pointer"
+                    title={quickPreviewState === 'finished' ? 'Restart' : 'Play'}
+                  >
+                    <Play className="w-4 h-4" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  data-testid="preview-restart-btn"
+                  onClick={onRestartQuickPreview}
+                  className="p-2 rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white transition-colors cursor-pointer"
+                  title="Restart from beginning"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Speed chips */}
+              <div
+                className="flex items-center space-x-1 bg-slate-800/80 p-1 rounded-lg border border-slate-700/60"
+                role="radiogroup"
+                aria-label="Playback Speed"
+              >
+                {(['slow', 'normal', 'fast'] as const).map((spd) => {
+                  const isSelected = (quickPreviewSpeed || 'normal') === spd;
+                  const label = spd === 'slow' ? 'Slow' : spd === 'normal' ? 'Normal' : 'Fast';
+                  return (
+                    <button
+                      key={spd}
+                      type="button"
+                      role="radio"
+                      aria-checked={isSelected}
+                      data-testid={`speed-chip-${spd}`}
+                      onClick={() => onSetQuickPreviewSpeed?.(spd)}
+                      className={`px-2 py-1 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-teal-500 text-slate-950 shadow-sm'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {canonicalRoute?.status === 'calculated' && activeRoute && activeRoute.points.length >= 2 && (
           <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-teal-500/10 border border-teal-500/30 text-teal-300 text-[11px]">
             <span>
               ✓ Route ready ({activeRoute.stats?.distanceKm || 0} km)
@@ -738,9 +1191,40 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
             {activeRoute && (
               <div className="group space-y-3 pt-2 border-t border-slate-800">
                 <div className="flex items-center justify-between relative">
-                  <span className="font-semibold text-slate-200 truncate max-w-[130px]">
-                    {activeRoute.name}
-                  </span>
+                  {isRenamingRoute ? (
+                    <div className="flex items-center gap-1.5 flex-1 mr-2">
+                      <input
+                        type="text"
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleConfirmRename();
+                          if (e.key === 'Escape') setIsRenamingRoute(false);
+                        }}
+                        autoFocus
+                        aria-label="New route name"
+                        className="flex-1 min-w-0 px-2 py-1 rounded bg-[#0f172a] border border-teal-500 text-xs text-slate-100"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleConfirmRename}
+                        className="px-2 py-1 rounded bg-teal-500 text-slate-950 font-bold text-[11px]"
+                      >
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIsRenamingRoute(false)}
+                        className="px-2 py-1 rounded bg-slate-800 text-slate-300 text-[11px]"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <span className="font-semibold text-slate-200 truncate max-w-[130px]">
+                      {activeRoute.name}
+                    </span>
+                  )}
                   <div className="flex items-center space-x-1">
                     {onFitRoute && activeRoute.points.length > 0 && (
                       <button
@@ -831,9 +1315,9 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
                           }
                           className="bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-[10px] text-slate-200 flex-1 min-w-0"
                         >
-                          {ALL_TRANSPORTS.map((tm) => (
+                          {CANONICAL_TRANSPORTS.map((tm) => (
                             <option key={tm.id} value={tm.id}>
-                              {tm.label}
+                              {tm.label} ({tm.routingDescription})
                             </option>
                           ))}
                         </select>
@@ -864,44 +1348,34 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
                   </div>
                 </div>
 
-                {/* All 59 Transports Picker */}
+                {/* Canonical 6 Transport Modes & Routing Engines */}
                 <div className="space-y-1.5">
                   <div className="group-title flex items-center justify-between">
-                    <span>All 59 transport vehicles</span>
-                    <span className="text-[10px] text-slate-400 capitalize">
-                      {ALL_TRANSPORTS.find((t) => t.id === (activeRoute.transportType || 'car'))?.label}
+                    <span>Transport mode & routing engine</span>
+                    <span className="text-[10px] text-teal-400 capitalize font-medium">
+                      {CANONICAL_TRANSPORTS.find((t) => t.id === (activeRoute.transportType || 'car'))?.label || 'Car'}
                     </span>
                   </div>
-                  <div className="flex overflow-x-auto space-x-1 pb-1 scrollbar-none">
-                    {TRANSPORT_CATEGORIES.map((cat) => (
-                      <button
-                        key={cat.id}
-                        onClick={() => setActiveCategory(cat.id)}
-                        className={`px-2 py-1 rounded-md text-[10px] whitespace-nowrap border transition-all ${
-                          activeCategory === cat.id
-                            ? 'border-teal-500 bg-teal-500/15 text-teal-400 font-semibold'
-                            : 'border-slate-700 bg-slate-800 text-slate-400'
-                        }`}
-                      >
-                        {cat.label}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="grid grid-cols-3 gap-1.5 max-h-44 overflow-y-auto p-1 bg-[#1e293b] rounded-lg border border-slate-700">
-                    {filteredTransports.map((tm) => (
-                      <button
-                        key={tm.id}
-                        onClick={() => onUpdateRoute({ ...activeRoute, transportType: tm.id })}
-                        className={`p-1.5 rounded-lg border flex flex-col items-center justify-center space-y-1 transition-all ${
-                          (activeRoute.transportType || 'car') === tm.id
-                            ? 'border-teal-500 bg-teal-500/15 text-teal-400 font-semibold'
-                            : 'border-slate-700 bg-[#0f172a] text-slate-400'
-                        }`}
-                      >
-                        {getCategoryIcon(tm.iconName)}
-                        <span className="text-[9px] text-center truncate w-full">{tm.label}</span>
-                      </button>
-                    ))}
+                  <div className="grid grid-cols-3 gap-1.5 p-1 bg-[#1e293b] rounded-lg border border-slate-700">
+                    {CANONICAL_TRANSPORTS.map((tm) => {
+                      const isSelected = (activeRoute.transportType || 'car') === tm.id;
+                      return (
+                        <button
+                          key={tm.id}
+                          type="button"
+                          onClick={() => handleSelectTransport(tm.id, tm.snap)}
+                          className={`p-2 rounded-lg border flex flex-col items-center justify-center space-y-1 transition-all ${
+                            isSelected
+                              ? 'border-teal-500 bg-teal-500/15 text-teal-400 font-semibold shadow-sm'
+                              : 'border-slate-700 bg-[#0f172a] text-slate-300 hover:border-slate-600 hover:text-slate-100'
+                          }`}
+                        >
+                          {tm.icon}
+                          <span className="text-[10px] font-semibold">{tm.label}</span>
+                          <span className="text-[8px] text-slate-400">{tm.routingDescription}</span>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 

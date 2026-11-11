@@ -1,12 +1,43 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { MapProject, StepId, Route, MapTheme, RoutePoint, MapSign, OverlayConfig, CameraBlock, CameraModePreset, AspectRatioOption, DurationPreset, DestinationPreview } from '../types';
+import {
+  MapProject,
+  StepId,
+  Route,
+  MapTheme,
+  RoutePoint,
+  MapSign,
+  OverlayConfig,
+  CameraBlock,
+  CameraModePreset,
+  AspectRatioOption,
+  DurationPreset,
+  DestinationPreview,
+  CanonicalRoute,
+  Scene,
+  QuickPreviewSpeed,
+  QuickPreviewState,
+  QUICK_PREVIEW_BASE_SPEED_KMH,
+  QUICK_PREVIEW_SPEED_MULTIPLIERS,
+} from '../types';
+import { CatmullRom3DPath } from '../utils/catmullRom3DPath';
+import { getAdaptedCanonicalRoute } from '../utils/routeAdapter';
+import { projectStorage } from '../utils/indexedDbStorage';
 import { MapViewer } from './MapViewer';
 import { RouteEditorPanel } from './RouteEditorPanel';
 import { SignsEditorPanel } from './SignsEditorPanel';
 import { OverlaysEditorPanel } from './OverlaysEditorPanel';
 import { CameraEditorPanel } from './CameraEditorPanel';
-import { Play, Pause, HelpCircle, Download } from 'lucide-react';
+import { MobileSheetHeader, MobileBottomStageBar } from './MobileStageNav';
+import { TabletDrawerContainer } from './TabletDrawerContainer';
+import {
+  useResponsiveLayout,
+  getStageForStep,
+  getDefaultStepForStage,
+  MobileStageId,
+  MobileSheetSnap,
+} from '../utils/useResponsiveLayout';
+import { Play, Pause, HelpCircle, Download, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { SnapProfile, getRoadRoute } from '../utils/roadRouter';
 import { calculateTrackStats } from '../utils/gpxParser';
 import { exportProjectFile } from '../utils/projectStorage';
@@ -71,12 +102,6 @@ function formatTimeSec(sec: number): string {
   return `${m}:${Number(s) < 10 ? '0' : ''}${s}`;
 }
 
-function formatTimelineClock(sec: number): string {
-  const m = Math.floor(sec / 60);
-  const s = Math.floor(sec % 60);
-  return `${m}:${s < 10 ? '0' : ''}${s}`;
-}
-
 export const EditorPage: React.FC<EditorPageProps> = ({
   project,
   onUpdateProject,
@@ -92,63 +117,139 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   const [routingInterval, setRoutingInterval] = useState<number | 'auto'>(0.1);
   const [activeSceneIndex, setActiveSceneIndex] = useState(0);
 
-  // Command+Z Undo / Redo action history stack
-  const undoStackRef = useRef<any[]>([]);
-  const redoStackRef = useRef<any[]>([]);
-  const lastSnapshotTimeRef = useRef<number>(0);
+  // Responsive layout state (Desktop / Tablet Drawer / iPhone 4-Stage Sheet)
+  const { tier, experience } = useResponsiveLayout();
+  const [tabletDrawerOpen, setTabletDrawerOpen] = useState(true);
+  const [mobileSheetSnap, setMobileSheetSnap] = useState<MobileSheetSnap>('split');
+  const [lastStepByStage, setLastStepByStage] = useState<Record<MobileStageId, StepId>>({
+    journey: 'route',
+    style: 'camera',
+    personalize: 'title',
+    video: 'preview',
+  });
+
+  useEffect(() => {
+    const stageId = getStageForStep(currentStep);
+    setLastStepByStage((prev) =>
+      prev[stageId] === currentStep ? prev : { ...prev, [stageId]: currentStep }
+    );
+  }, [currentStep]);
+
+  const handleSelectMobileStage = (stageId: MobileStageId) => {
+    const targetStep = lastStepByStage[stageId] || getDefaultStepForStage(stageId);
+    setCurrentStep(targetStep);
+    if (mobileSheetSnap === 'map') {
+      setMobileSheetSnap('split');
+    }
+  };
+
+  // Command+Z Undo / Redo action history stack (Unified project-wide, max 20 entries)
+  const MAX_UNDO_ENTRIES = 20;
+  const undoStackRef = useRef<MapProject[]>([]);
+  const redoStackRef = useRef<MapProject[]>([]);
+  const isInteractionActiveRef = useRef<boolean>(false);
+  const hasInteractionMovedRef = useRef<boolean>(false);
+  const preInteractionSnapshotRef = useRef<MapProject | null>(null);
   const projectRef = useRef(project);
   projectRef.current = project;
 
-  const pushUndoSnapshot = (force: boolean = true) => {
-    const now = Date.now();
-    if (!force && now - lastSnapshotTimeRef.current < 600) return;
-    lastSnapshotTimeRef.current = now;
+  // Explicit drag interaction lifecycle handling:
+  // 1. Pointer-down starts tracking, but does not yet create a history entry
+  const beginTrackingInteraction = () => {
+    isInteractionActiveRef.current = true;
+    hasInteractionMovedRef.current = false;
+    preInteractionSnapshotRef.current = JSON.parse(JSON.stringify(projectRef.current));
+  };
 
-    const snapshot = JSON.parse(JSON.stringify(projectRef.current.scenes));
+  // 2. The first actual position change captures the pre-drag project snapshot
+  const notifyInteractionMoved = () => {
+    if (isInteractionActiveRef.current && !hasInteractionMovedRef.current) {
+      hasInteractionMovedRef.current = true;
+      if (preInteractionSnapshotRef.current) {
+        undoStackRef.current.push(preInteractionSnapshotRef.current);
+        if (undoStackRef.current.length > MAX_UNDO_ENTRIES) {
+          undoStackRef.current.shift();
+        }
+        redoStackRef.current = [];
+      }
+    }
+  };
+
+  // 3. Normal completion (pointer-up): commits the drag and its single undo snapshot
+  const endTrackingInteraction = () => {
+    if (!isInteractionActiveRef.current) return;
+    isInteractionActiveRef.current = false;
+    hasInteractionMovedRef.current = false;
+    preInteractionSnapshotRef.current = null;
+  };
+
+  // 4. Cancellation (pointer-cancel, lost pointer capture, or interrupted drag):
+  // Restores the project back to the pre-drag snapshot and removes the pending undo entry
+  const cancelTrackingInteraction = () => {
+    if (!isInteractionActiveRef.current) return;
+    const snapshotToRestore = preInteractionSnapshotRef.current;
+    const hadMoved = hasInteractionMovedRef.current;
+
+    isInteractionActiveRef.current = false;
+    hasInteractionMovedRef.current = false;
+    preInteractionSnapshotRef.current = null;
+
+    if (hadMoved && snapshotToRestore) {
+      if (undoStackRef.current.length > 0) {
+        undoStackRef.current.pop();
+      }
+      onUpdateProject((_prev) => ({
+        ...snapshotToRestore,
+        updatedAt: Date.now(),
+      }));
+    }
+  };
+
+  // Unconditionally captures a snapshot for a discrete completed user action.
+  // Suppressed during an active drag interaction to prevent partial history pollution.
+  const pushUndoSnapshot = () => {
+    if (isInteractionActiveRef.current) return;
+
+    // Capture complete immutable snapshot of project document
+    const snapshot: MapProject = JSON.parse(JSON.stringify(projectRef.current));
     undoStackRef.current.push(snapshot);
-    if (undoStackRef.current.length > 50) {
+    if (undoStackRef.current.length > MAX_UNDO_ENTRIES) {
       undoStackRef.current.shift();
     }
     redoStackRef.current = [];
   };
 
   const handleUndo = () => {
-    if (undoStackRef.current.length === 0) {
-      // Fallback: pop last point of active route if available
-      const currentScenes = projectRef.current.scenes;
-      const targetScene = currentScenes[activeSceneIndex] || currentScenes[0];
-      const route = targetScene?.routes.find((r) => r.id === activeRouteId);
-      if (route && route.points.length > 0) {
-        const popped = route.points.slice(0, -1);
-        handleUpdateRoute({
-          ...route,
-          points: popped,
-          stats: calculateTrackStats(popped),
-        });
-      }
-      return;
+    // Prevent Undo during an active drag interaction
+    if (isInteractionActiveRef.current) return;
+    if (undoStackRef.current.length === 0) return;
+    const previousSnapshot: MapProject = undoStackRef.current.pop()!;
+    const currentSnapshot: MapProject = JSON.parse(JSON.stringify(projectRef.current));
+    redoStackRef.current.push(currentSnapshot);
+    if (redoStackRef.current.length > MAX_UNDO_ENTRIES) {
+      redoStackRef.current.shift();
     }
-    const previousScenes = undoStackRef.current.pop()!;
-    const currentScenes = JSON.parse(JSON.stringify(projectRef.current.scenes));
-    redoStackRef.current.push(currentScenes);
 
-    onUpdateProject((prev) => ({
-      ...prev,
+    onUpdateProject((_prev) => ({
+      ...previousSnapshot,
       updatedAt: Date.now(),
-      scenes: previousScenes,
     }));
   };
 
   const handleRedo = () => {
+    // Prevent Redo during an active drag interaction
+    if (isInteractionActiveRef.current) return;
     if (redoStackRef.current.length === 0) return;
-    const nextScenes = redoStackRef.current.pop()!;
-    const currentScenes = JSON.parse(JSON.stringify(projectRef.current.scenes));
-    undoStackRef.current.push(currentScenes);
+    const nextSnapshot: MapProject = redoStackRef.current.pop()!;
+    const currentSnapshot: MapProject = JSON.parse(JSON.stringify(projectRef.current));
+    undoStackRef.current.push(currentSnapshot);
+    if (undoStackRef.current.length > MAX_UNDO_ENTRIES) {
+      undoStackRef.current.shift();
+    }
 
-    onUpdateProject((prev) => ({
-      ...prev,
+    onUpdateProject((_prev) => ({
+      ...nextSnapshot,
       updatedAt: Date.now(),
-      scenes: nextScenes,
     }));
   };
 
@@ -175,9 +276,146 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   const [helpTab, setHelpTab] = useState<'guide' | 'shortcuts' | 'heic'>('guide');
   const stageRef = useRef<HTMLDivElement>(null);
 
+  const canonicalRoute = project.routes?.[0];
+  const projectRoutes: Route[] = [getAdaptedCanonicalRoute(canonicalRoute)];
+
+  // Quick Route Preview state
+  const [quickPreviewState, setQuickPreviewState] = useState<QuickPreviewState>('idle');
+  const [quickPreviewProgress, setQuickPreviewProgress] = useState<number>(0);
+  const [quickPreviewSpeed, setQuickPreviewSpeed] = useState<QuickPreviewSpeed>('normal');
+
+  const previewRafRef = useRef<number | null>(null);
+  const previewLastTimeRef = useRef<number>(0);
+  const previewProgressRef = useRef<number>(0);
+  previewProgressRef.current = quickPreviewProgress;
+
+  // Single consistent distance-normalized progress model derived from CatmullRom3DPath
+  const previewPathEngine = useMemo(() => {
+    const pts = canonicalRoute?.calculatedGeometry || projectRoutes[0]?.points || [];
+    return new CatmullRom3DPath(pts);
+  }, [canonicalRoute?.calculatedGeometry, projectRoutes]);
+
+  const totalPreviewDistanceKm = previewPathEngine.getTotalDistanceKm();
+  const remainingPreviewDistanceKm = previewPathEngine.getRemainingDistanceKm(quickPreviewProgress);
+
+  const invalidateRouteAndStopPreview = () => {
+    if (previewRafRef.current !== null) {
+      cancelAnimationFrame(previewRafRef.current);
+      previewRafRef.current = null;
+    }
+    setQuickPreviewState('idle');
+    setQuickPreviewProgress(0);
+  };
+
+  const stopQuickPreview = () => {
+    invalidateRouteAndStopPreview();
+  };
+
+  const pauseQuickPreview = () => {
+    if (previewRafRef.current !== null) {
+      cancelAnimationFrame(previewRafRef.current);
+      previewRafRef.current = null;
+    }
+    setQuickPreviewState('paused');
+  };
+
+  const resumeQuickPreview = () => {
+    if (totalPreviewDistanceKm <= 0) {
+      setQuickPreviewState('finished');
+      setQuickPreviewProgress(1);
+      previewProgressRef.current = 1;
+      return;
+    }
+    previewLastTimeRef.current = performance.now();
+    setQuickPreviewState('playing');
+  };
+
+  const startQuickPreview = () => {
+    if (totalPreviewDistanceKm <= 0) {
+      setQuickPreviewState('finished');
+      setQuickPreviewProgress(1);
+      previewProgressRef.current = 1;
+      return;
+    }
+    setQuickPreviewProgress(0);
+    previewProgressRef.current = 0;
+    previewLastTimeRef.current = performance.now();
+    setQuickPreviewState('playing');
+  };
+
+  const restartQuickPreview = () => {
+    setQuickPreviewProgress(0);
+    previewProgressRef.current = 0;
+    if (totalPreviewDistanceKm <= 0) {
+      setQuickPreviewState('finished');
+      return;
+    }
+    previewLastTimeRef.current = performance.now();
+    setQuickPreviewState('playing');
+  };
+
+  // Quick Preview Animation Loop: constant geographic distance per second
+  useEffect(() => {
+    if (quickPreviewState !== 'playing') {
+      if (previewRafRef.current !== null) {
+        cancelAnimationFrame(previewRafRef.current);
+        previewRafRef.current = null;
+      }
+      return;
+    }
+
+    const speedMultiplier = QUICK_PREVIEW_SPEED_MULTIPLIERS[quickPreviewSpeed] || 1.0;
+    const speedKmh = QUICK_PREVIEW_BASE_SPEED_KMH * speedMultiplier;
+    const durationSec = totalPreviewDistanceKm > 0 ? (totalPreviewDistanceKm * 3600) / speedKmh : 0;
+
+    if (durationSec <= 0) {
+      setQuickPreviewState('finished');
+      setQuickPreviewProgress(1);
+      previewProgressRef.current = 1;
+      return;
+    }
+
+    previewLastTimeRef.current = performance.now();
+
+    const tick = (now: number) => {
+      const deltaSec = (now - previewLastTimeRef.current) / 1000;
+      previewLastTimeRef.current = now;
+
+      const progressDelta = deltaSec / durationSec;
+      const nextProgress = Math.min(1, previewProgressRef.current + progressDelta);
+
+      if (nextProgress >= 1) {
+        previewProgressRef.current = 1;
+        setQuickPreviewProgress(1);
+        setQuickPreviewState('finished');
+        previewRafRef.current = null;
+      } else {
+        previewProgressRef.current = nextProgress;
+        setQuickPreviewProgress(nextProgress);
+        previewRafRef.current = requestAnimationFrame(tick);
+      }
+    };
+
+    previewRafRef.current = requestAnimationFrame(tick);
+
+    return () => {
+      if (previewRafRef.current !== null) {
+        cancelAnimationFrame(previewRafRef.current);
+        previewRafRef.current = null;
+      }
+    };
+  }, [quickPreviewState, quickPreviewSpeed, totalPreviewDistanceKm]);
+
+  // Automatically exit preview mode if stepping away from 'route'
+  useEffect(() => {
+    if (currentStep !== 'route' && quickPreviewState !== 'idle') {
+      invalidateRouteAndStopPreview();
+    }
+  }, [currentStep, quickPreviewState]);
+
   const activeScene = project.scenes[activeSceneIndex] || project.scenes[0];
   const [activeRouteId, setActiveRouteId] = useState<string>(
-    activeScene?.routes[0]?.id || 'route-1'
+    projectRoutes[0]?.id || 'route-1'
   );
 
   const duration = activeScene?.duration || 15;
@@ -206,7 +444,14 @@ export const EditorPage: React.FC<EditorPageProps> = ({
       else if (e.key === '6') setCurrentStep('preview');
       else if (e.key === ' ') {
         e.preventDefault();
-        setIsPlaying((p) => !p);
+        if (currentStep === 'route') {
+          if (quickPreviewState === 'playing') pauseQuickPreview();
+          else if (quickPreviewState === 'paused') resumeQuickPreview();
+          else if (quickPreviewState === 'finished') restartQuickPreview();
+          else startQuickPreview();
+        } else {
+          setIsPlaying((p) => !p);
+        }
       } else if (e.key === 'n' || e.key === 'N') {
         e.preventDefault();
         handleAddCameraBlock(cameraMode);
@@ -265,7 +510,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   }, [isPlaying, duration, playbackSpeed, isRendering, renderAllScenes, activeSceneIndex, project.scenes.length]);
 
   const uiMode = project.uiMode || 'simple';
-  const activeRoute = activeScene.routes.find((r) => r.id === activeRouteId) || activeScene.routes[0];
+  const activeRoute = projectRoutes[0];
   const handleSetUIMode = (mode: 'simple' | 'advanced') => {
     onUpdateProject((prev) => ({
       ...prev,
@@ -294,12 +539,22 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   };
 
   const handleAddScene = () => {
-    const newScene = {
-      ...activeScene,
-      id: `scene-${Date.now()}`,
+    pushUndoSnapshot();
+    const newScene: Scene = {
+      id: `scene-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       name: `Scene ${project.scenes.length + 1}`,
-      routes: [],
+      duration: activeScene.duration || 15,
+      holdStartSec: 0,
+      holdEndSec: 0,
+      mapThemeId: activeScene.mapThemeId || 'satellite-streets',
+      mapLabels: activeScene.mapLabels,
+      labelLang: activeScene.labelLang,
+      regions: activeScene.regions,
+      terrain: activeScene.terrain,
+      camera: activeScene.camera ? { ...activeScene.camera } : undefined,
       signs: [],
+      cameraBlocks: [],
+      overlays: { ...activeScene.overlays },
     };
     onUpdateProject((prev) => ({
       ...prev,
@@ -309,135 +564,173 @@ export const EditorPage: React.FC<EditorPageProps> = ({
     setActiveSceneIndex(project.scenes.length);
   };
 
+  const handleDeleteScene = (indexToDelete: number) => {
+    if (project.scenes.length <= 1) {
+      alert('A project must contain at least one scene.');
+      return;
+    }
+    pushUndoSnapshot();
+    onUpdateProject((prev) => ({
+      ...prev,
+      updatedAt: Date.now(),
+      scenes: prev.scenes.filter((_, idx) => idx !== indexToDelete),
+    }));
+    if (activeSceneIndex >= indexToDelete) {
+      setActiveSceneIndex(Math.max(0, activeSceneIndex - 1));
+    }
+  };
+
   const handleAddPoint = async (point: { lng: number; lat: number }) => {
-    pushUndoSnapshot(true);
-    const targetRoute = activeScene.routes.find((r) => r.id === activeRouteId);
+    invalidateRouteAndStopPreview();
+    pushUndoSnapshot();
+    const targetRoute = projectRoutes[0];
     let newPoints: RoutePoint[] = [point];
 
     if (snapProfile !== 'off' && targetRoute && targetRoute.points.length > 0) {
       const lastPoint = targetRoute.points[targetRoute.points.length - 1];
-      newPoints = await getRoadRoute(lastPoint, point, snapProfile, routingInterval);
+      try {
+        newPoints = await getRoadRoute(lastPoint, point, snapProfile, routingInterval, false);
+      } catch (err) {
+        console.warn('Road routing failed, falling back:', err);
+        newPoints = await getRoadRoute(lastPoint, point, snapProfile, routingInterval, true);
+      }
     }
 
     onUpdateProject((prev) => {
-      const updatedRoutes = prev.scenes[activeSceneIndex].routes.map((r) => {
-        if (r.id === activeRouteId) {
-          const merged = [...r.points, ...newPoints];
-          return {
-            ...r,
-            points: merged,
-            stats: calculateTrackStats(merged),
-          };
-        }
-        return r;
-      });
+      const canonical = prev.routes?.[0];
+      const mergedPoints = [...(canonical?.calculatedGeometry || targetRoute.points), ...newPoints];
+      const updatedRoute: CanonicalRoute = {
+        id: canonical?.id || targetRoute.id,
+        name: canonical?.name || targetRoute.name,
+        color: canonical?.color || targetRoute.color || '#ff4d2e',
+        width: canonical?.width ?? targetRoute.width ?? 8,
+        style: canonical?.style || targetRoute.style || 'solid',
+        status: 'stale',
+        stops: canonical?.stops ? [...canonical.stops] : [],
+        segments: canonical?.segments ? [...canonical.segments] : [],
+        calculatedGeometry: mergedPoints,
+        stats: calculateTrackStats(mergedPoints),
+      };
       return {
         ...prev,
         updatedAt: Date.now(),
-        scenes: prev.scenes.map((s, idx) =>
-          idx === activeSceneIndex ? { ...s, routes: updatedRoutes } : s
-        ),
+        routes: [updatedRoute],
       };
     });
   };
 
   const handleAddRoute = () => {
-    if (activeScene.routes.length >= 6) {
-      alert('A scene can have up to six routes.');
-      return;
-    }
-    const colors = ['#ff4d2e', '#2196f3', '#4caf50', '#ff9800', '#9c27b0', '#00bcd4'];
-    const newRoute: Route = {
-      id: `route-${Date.now()}`,
-      name: `Route ${activeScene.routes.length + 1}`,
-      color: colors[activeScene.routes.length % colors.length],
-      width: 8,
-      style: 'solid',
-      transportType: 'car',
-      symbolScale: 1.0,
-      legs: [],
-      points: [],
-    };
-    onUpdateProject((prev) => ({
-      ...prev,
-      updatedAt: Date.now(),
-      scenes: prev.scenes.map((s, idx) =>
-        idx === activeSceneIndex ? { ...s, routes: [...s.routes, newRoute] } : s
-      ),
-    }));
-    setActiveRouteId(newRoute.id);
+    // Single canonical route model enforces exactly 1 route per project
+    alert('Map Animator enforces a single continuous journey per project.');
   };
 
-  const handleDuplicateRoute = (route: Route) => {
-    if (activeScene.routes.length >= 6) {
-      alert('A scene can have up to six routes.');
-      return;
-    }
-    const colors = ['#ff4d2e', '#2196f3', '#4caf50', '#ff9800', '#9c27b0', '#00bcd4'];
-    const duplicated: Route = {
-      ...route,
-      id: `route-${Date.now()}`,
-      name: `${route.name} (Copy)`,
-      color: colors[activeScene.routes.length % colors.length],
-    };
-    onUpdateProject((prev) => ({
-      ...prev,
-      updatedAt: Date.now(),
-      scenes: prev.scenes.map((s, idx) =>
-        idx === activeSceneIndex ? { ...s, routes: [...s.routes, duplicated] } : s
-      ),
-    }));
-    setActiveRouteId(duplicated.id);
+  const handleDuplicateRoute = (_route: Route) => {
+    alert('Map Animator enforces a single continuous journey per project.');
   };
 
-  const handleDeleteRoute = (id: string) => {
-    pushUndoSnapshot(true);
+  const handleDeleteRoute = (_id: string) => {
+    invalidateRouteAndStopPreview();
+    pushUndoSnapshot();
     onUpdateProject((prev) => {
-      const filtered = prev.scenes[activeSceneIndex].routes.filter((r) => r.id !== id);
-      if (activeRouteId === id && filtered.length > 0) {
-        setActiveRouteId(filtered[0].id);
-      }
+      const canonical = prev.routes?.[0];
+      const clearedRoute: CanonicalRoute = {
+        id: canonical?.id || `route-${Date.now()}`,
+        name: canonical?.name || 'Main Journey',
+        color: canonical?.color || '#ff4d2e',
+        width: canonical?.width || 8,
+        style: canonical?.style || 'solid',
+        status: 'idle',
+        stops: [],
+        segments: [],
+        calculatedGeometry: [],
+        stats: { distanceKm: 0, elevationGainM: 0, elevationLossM: 0 },
+      };
       return {
         ...prev,
         updatedAt: Date.now(),
-        scenes: prev.scenes.map((s, idx) =>
-          idx === activeSceneIndex ? { ...s, routes: filtered } : s
-        ),
+        routes: [clearedRoute],
       };
     });
   };
 
-  const handleUpdateRoute = (updated: Route) => {
-    pushUndoSnapshot(false);
-    onUpdateProject((prev) => ({
-      ...prev,
-      updatedAt: Date.now(),
-      scenes: prev.scenes.map((s, idx) =>
-        idx === activeSceneIndex
-          ? { ...s, routes: s.routes.map((r) => (r.id === updated.id ? updated : r)) }
-          : s
-      ),
-    }));
+  const handleUpdateCanonicalRoute = (updatedCanonical: CanonicalRoute, isCalculationResult?: boolean) => {
+    if (isCalculationResult) {
+      onUpdateProject((prev) => ({
+        ...prev,
+        updatedAt: Date.now(),
+        routes: [updatedCanonical],
+      }));
+    } else {
+      invalidateRouteAndStopPreview();
+      pushUndoSnapshot();
+      onUpdateProject((prev) => {
+        const canonical = prev.routes?.[0];
+        const staleCanonical: CanonicalRoute = {
+          ...updatedCanonical,
+          status: 'stale',
+          calculatedGeometry:
+            updatedCanonical.calculatedGeometry && updatedCanonical.calculatedGeometry.length > 0
+              ? updatedCanonical.calculatedGeometry
+              : (canonical?.calculatedGeometry || []),
+        };
+        return {
+          ...prev,
+          updatedAt: Date.now(),
+          routes: [staleCanonical],
+        };
+      });
+    }
+  };
+
+  const handleUpdateRoute = (updated: Route, skipUndo?: boolean) => {
+    invalidateRouteAndStopPreview();
+    if (!skipUndo) {
+      pushUndoSnapshot();
+    }
+    onUpdateProject((prev) => {
+      const canonical = prev.routes?.[0];
+      const updatedRoute: CanonicalRoute = {
+        id: updated.id || canonical?.id || `route-${Date.now()}`,
+        name: updated.name || canonical?.name || 'Main Journey',
+        color: updated.color || canonical?.color || '#ff4d2e',
+        width: updated.width ?? (canonical?.width || 8),
+        style: updated.style || canonical?.style || 'solid',
+        hideLine: updated.hideLine,
+        symbolScale: updated.symbolScale,
+        startOffsetSec: updated.startOffsetSec,
+        status: skipUndo ? (canonical?.status || 'idle') : 'stale',
+        stops: canonical?.stops ? [...canonical.stops] : [],
+        segments: canonical?.segments ? [...canonical.segments] : [],
+        calculatedGeometry: [...updated.points],
+        stats: updated.stats || calculateTrackStats(updated.points),
+      };
+      return {
+        ...prev,
+        updatedAt: Date.now(),
+        routes: [updatedRoute],
+      };
+    });
   };
 
   // Signs handlers
   const handleAddSign = (sign: MapSign) => {
-    pushUndoSnapshot(true);
+    pushUndoSnapshot();
     updateActiveScene({ signs: [...activeScene.signs, sign] });
   };
   const handleUpdateSign = (sign: MapSign) => {
+    pushUndoSnapshot();
     updateActiveScene({
       signs: activeScene.signs.map((s) => (s.id === sign.id ? sign : s)),
     });
   };
   const handleDeleteSign = (id: string) => {
-    pushUndoSnapshot(true);
+    pushUndoSnapshot();
     updateActiveScene({
       signs: activeScene.signs.filter((s) => s.id !== id),
     });
   };
   const handleReorderSigns = (newSigns: MapSign[]) => {
-    pushUndoSnapshot(true);
+    pushUndoSnapshot();
     updateActiveScene({ signs: newSigns });
   };
 
@@ -448,8 +741,8 @@ export const EditorPage: React.FC<EditorPageProps> = ({
 
   // Camera keyframe block handlers (Oct 20 changelog & 3D pipeline)
   const handleAddCameraBlock = (kind: 'follow' | 'still' | 'orbit' | 'tripod') => {
-    pushUndoSnapshot(true);
-    const pts = activeScene.routes[0]?.points || [];
+    pushUndoSnapshot();
+    const pts = projectRoutes[0]?.points || [];
     const tRatio = duration > 0 ? Math.min(1, Math.max(0, currentTime / duration)) : 0;
     const idx = Math.min(pts.length - 1, Math.max(0, Math.floor(pts.length * tRatio)));
     const targetPt = pts[idx] || (pts.length > 0 ? pts[0] : { lng: 15, lat: 50 });
@@ -482,7 +775,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   };
 
   const handleDeleteCameraBlock = (id: string) => {
-    pushUndoSnapshot(true);
+    pushUndoSnapshot();
     updateActiveScene({
       cameraBlocks: (activeScene.cameraBlocks || []).filter((cb) => cb.id !== id),
     });
@@ -507,8 +800,8 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   const durationPreset: DurationPreset = project.durationPreset || (duration === 20 ? 20 : duration === 40 ? 40 : duration === 60 ? 60 : 'custom');
 
   const handleSetCameraPreset = (preset: CameraModePreset) => {
-    pushUndoSnapshot(true);
-    const pts = activeScene.routes[0]?.points || [];
+    pushUndoSnapshot();
+    const pts = projectRoutes[0]?.points || [];
     const newBlocks = mapPresetToCameraBlocks(preset, pts);
 
     onUpdateProject((prev) => ({
@@ -547,7 +840,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   };
 
   const handleSetAspectRatio = (newAspect: AspectRatioOption) => {
-    pushUndoSnapshot(true);
+    pushUndoSnapshot();
     onUpdateProject((prev) => ({
       ...prev,
       aspect: newAspect,
@@ -557,7 +850,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   };
 
   const handleSetDuration = (newDuration: number, preset?: DurationPreset) => {
-    pushUndoSnapshot(true);
+    pushUndoSnapshot();
     onUpdateProject((prev) => ({
       ...prev,
       duration: newDuration,
@@ -633,194 +926,49 @@ export const EditorPage: React.FC<EditorPageProps> = ({
     }
   };
 
-  return (
-    <div className="editor h-screen w-screen flex flex-col bg-[var(--bg)] text-[var(--text)] overflow-hidden">
-      {/* 1. Top Bar */}
-      <header className="topbar h-12 border-b border-[var(--border)] bg-[var(--panel)] px-4 flex items-center justify-between z-30">
-        <div className="crumb flex items-center space-x-3">
-          <button
-            type="button"
-            className="back text-xs font-semibold text-[var(--muted)] hover:text-[var(--text)] transition-colors flex items-center space-x-1"
-            onClick={onBackToHome}
-          >
-            <span>← Projects</span>
-          </button>
-          <span className="text-[var(--border)]">/</span>
-          <input
-            className="project-title bg-transparent border-0 font-semibold text-sm text-[var(--text)] focus:ring-1 focus:ring-[var(--accent)] px-2 py-1 rounded"
-            value={project.name}
-            onChange={(e) =>
-              onUpdateProject((prev) => ({
-                ...prev,
-                name: e.target.value,
-                updatedAt: Date.now(),
-              }))
-            }
-            aria-label="Project name"
-          />
-        </div>
+  const activeStepPanel = (
+    <>
+      {/* Step 1: Route ("Where are we going?") */}
+      {currentStep === 'route' && (
+        <RouteEditorPanel
+          routes={projectRoutes}
+          canonicalRoute={canonicalRoute}
+          activeRouteId={activeRouteId}
+          uiMode={uiMode}
+          snapProfile={snapProfile}
+          onSetSnapProfile={setSnapProfile}
+          routingInterval={routingInterval}
+          onSetRoutingInterval={setRoutingInterval}
+          onSelectRoute={setActiveRouteId}
+          onAddRoute={handleAddRoute}
+          onDuplicateRoute={handleDuplicateRoute}
+          onFitRoute={(r) => setFitRouteRequested({ ...r })}
+          onUpdateRoute={handleUpdateRoute}
+          onUpdateCanonicalRoute={handleUpdateCanonicalRoute}
+          onDeleteRoute={handleDeleteRoute}
+          onImportGPX={(file, opts) => onImportGPX(file, opts, activeSceneIndex)}
+          onPreviewDestination={(dest) => setDestinationPreview(dest)}
+          onNext={() => setCurrentStep('camera')}
+          quickPreviewState={quickPreviewState}
+          quickPreviewProgress={quickPreviewProgress}
+          quickPreviewSpeed={quickPreviewSpeed}
+          onStartQuickPreview={startQuickPreview}
+          onPauseQuickPreview={pauseQuickPreview}
+          onResumeQuickPreview={resumeQuickPreview}
+          onRestartQuickPreview={restartQuickPreview}
+          onStopQuickPreview={stopQuickPreview}
+          onSetQuickPreviewSpeed={setQuickPreviewSpeed}
+          onSeekQuickPreview={(p) => {
+            const clamped = Math.max(0, Math.min(1, p));
+            previewProgressRef.current = clamped;
+            setQuickPreviewProgress(clamped);
+          }}
+          remainingDistanceKm={remainingPreviewDistanceKm}
+        />
+      )}
 
-        {/* Multi-Scene Tabs */}
-        <div className="scene-tabs flex items-center space-x-1">
-          {project.scenes.map((s, idx) => (
-            <button
-              key={s.id}
-              onClick={() => {
-                setActiveSceneIndex(idx);
-                if (s.routes.length > 0) setActiveRouteId(s.routes[0].id);
-              }}
-              className={`px-3 py-1 text-xs rounded-t font-medium transition-colors ${
-                idx === activeSceneIndex
-                  ? 'border-b-2 border-[var(--accent)] bg-[var(--panel-2)] text-[var(--text)]'
-                  : 'text-[var(--muted)] hover:text-[var(--text)]'
-              }`}
-            >
-              Scene {idx + 1}
-            </button>
-          ))}
-          <button
-            onClick={handleAddScene}
-            className="px-2 py-1 text-xs text-[var(--muted)] hover:text-[var(--text)] font-medium"
-            title="Add a new scene"
-          >
-            +
-          </button>
-        </div>
-
-        <div className="flex items-center space-x-2">
-          {/* Export .mapanim Project File */}
-          <button
-            type="button"
-            onClick={() => exportProjectFile(project)}
-            className="text-xs px-2.5 py-1 rounded border border-[var(--border)] hover:bg-[var(--panel-2)] text-[var(--text)] flex items-center space-x-1"
-            title="Download project as .mapanim file"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>Export .mapanim</span>
-          </button>
-
-          <a
-            className="donate-mini text-xs px-2.5 py-1 rounded border border-[var(--border)] hover:bg-[var(--panel-2)] text-[var(--text)]"
-            href="https://www.paypal.com/donate/?hosted_button_id=4Z34EYQP2T548"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            ❤️ Donate
-          </a>
-        </div>
-      </header>
-
-      {/* 2. Step Bar */}
-      <nav className="stepbar h-11 border-b border-[var(--border)] bg-[var(--panel-2)] px-4 flex items-center justify-between z-20">
-        <div className="steps flex items-center space-x-1">
-          {steps.map((s) => {
-            const isActive = currentStep === s.id;
-            return (
-              <button
-                key={s.id}
-                onClick={() => setCurrentStep(s.id)}
-                className={`step px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center space-x-1.5 ${
-                  isActive
-                    ? 'active bg-[var(--panel)] text-[var(--accent)] shadow-sm border border-[var(--border)]'
-                    : 'text-[var(--muted)] hover:text-[var(--text)] hover:bg-[var(--panel)]'
-                }`}
-              >
-                <span className="num opacity-60 text-[10px]">{s.num}</span>
-                <span>{s.label}</span>
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="stepbar-right flex items-center space-x-3">
-          {/* Simple Mode vs Advanced Mode Toggle */}
-          <div className="flex items-center bg-[#0f172a] border border-slate-700 rounded-lg p-0.5 text-[11px]">
-            <button
-              type="button"
-              onClick={() => handleSetUIMode('simple')}
-              className={`px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer ${
-                uiMode === 'simple'
-                  ? 'bg-teal-500 text-slate-950 shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-              title="Simple Mode: Easy travel video maker"
-            >
-              ✨ Simple
-            </button>
-            <button
-              type="button"
-              onClick={() => handleSetUIMode('advanced')}
-              className={`px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer ${
-                uiMode === 'advanced'
-                  ? 'bg-teal-500 text-slate-950 shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-              title="Advanced Mode: Full camera, route, map and rendering controls"
-            >
-              ⚙️ Advanced
-            </button>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setHelpOpen(true)}
-            className="shortcuts-btn text-xs text-[var(--muted)] hover:text-[var(--text)] flex items-center space-x-1.5 px-2 py-1 rounded border border-[var(--border)]"
-            title="Help & Keyboard shortcuts (?)"
-          >
-            <HelpCircle className="w-3.5 h-3.5" />
-            <span className="shortcuts-label hidden sm:inline">Help & Shortcuts</span>
-          </button>
-
-          <label className="aspect-pick flex items-center space-x-1.5 text-xs text-[var(--muted)] cursor-pointer">
-            <span className="shape-icon w-3.5 h-2.5 border border-current rounded-sm"></span>
-            <select
-              value={project.aspect}
-              onChange={(e) =>
-                onUpdateProject((prev) => ({
-                  ...prev,
-                  aspect: e.target.value as any,
-                  aspectRatio: e.target.value as any,
-                  updatedAt: Date.now(),
-                }))
-              }
-              className="bg-[var(--panel)] text-[var(--text)] text-xs border border-[var(--border)] rounded px-2 py-1 focus:ring-1 focus:ring-[var(--accent)]"
-            >
-              <option value="16:9">16:9 Landscape</option>
-              <option value="9:16">9:16 Portrait (Reels/TikTok)</option>
-              <option value="1:1">1:1 Square</option>
-              <option value="4:5">4:5 Instagram</option>
-              <option value="21:9">21:9 Cinema</option>
-            </select>
-          </label>
-        </div>
-      </nav>
-
-      {/* 3. Main Workspace */}
-      <div className="workspace-wrap flex-1 flex relative overflow-hidden">
-        {/* Step 1: Route ("Where are we going?") */}
-        {currentStep === 'route' && (
-          <RouteEditorPanel
-            routes={activeScene.routes}
-            activeRouteId={activeRouteId}
-            uiMode={uiMode}
-            snapProfile={snapProfile}
-            onSetSnapProfile={setSnapProfile}
-            routingInterval={routingInterval}
-            onSetRoutingInterval={setRoutingInterval}
-            onSelectRoute={setActiveRouteId}
-            onAddRoute={handleAddRoute}
-            onDuplicateRoute={handleDuplicateRoute}
-            onFitRoute={(r) => setFitRouteRequested({ ...r })}
-            onUpdateRoute={handleUpdateRoute}
-            onDeleteRoute={handleDeleteRoute}
-            onImportGPX={(file, opts) => onImportGPX(file, opts, activeSceneIndex)}
-            onPreviewDestination={(dest) => setDestinationPreview(dest)}
-            onNext={() => setCurrentStep('camera')}
-          />
-        )}
-
-        {/* Step 3: Map ("What should the map look like?") */}
-        {currentStep === 'map' && (
+      {/* Step 3: Map ("What should the map look like?") */}
+      {currentStep === 'map' && (
           <aside className="panel w-85 h-full overflow-y-auto p-5 flex flex-col space-y-5 text-xs bg-[#0f172a] border-r border-slate-800 text-slate-100">
             <div>
               <span className="text-[11px] font-bold tracking-wider text-teal-400 uppercase">
@@ -830,69 +978,130 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                 What should the map look like?
               </h2>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Pick a map style for your travel video.
+                Pick a map style and view options for your travel video.
               </p>
             </div>
 
-            <div className="group">
-              <div className="group-title">MAP STYLE</div>
-              <div className="themes" role="radiogroup" aria-label="Map theme">
-                {PRIMARY_THEMES.map((theme) => (
-                  <button
-                    key={theme.id}
-                    role="radio"
-                    aria-checked={activeScene.mapThemeId === theme.id}
-                    className="theme"
-                    onClick={() => updateActiveScene({ mapThemeId: theme.id })}
-                    title={theme.note}
-                  >
-                    <ThemeSwatch info={theme} />
-                    <span>{theme.name}</span>
-                  </button>
-                ))}
+            {/* Map Style Theme Selector */}
+            <div className="space-y-2.5">
+              <span className="text-[11px] font-bold text-teal-400 uppercase tracking-wider block">
+                MAP STYLE ?
+              </span>
+              <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Map theme">
+                {PRIMARY_THEMES.map((theme) => {
+                  const isSelected = activeScene.mapThemeId === theme.id;
+                  return (
+                    <button
+                      key={theme.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={isSelected}
+                      onClick={() => updateActiveScene({ mapThemeId: theme.id })}
+                      title={theme.note}
+                      className={`p-2 rounded-xl border flex flex-col items-center space-y-1.5 transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-teal-500/15 border-teal-500 ring-2 ring-teal-500 text-teal-400 font-bold'
+                          : 'bg-[#1e293b] border-slate-700 text-slate-300 hover:border-teal-400'
+                      }`}
+                    >
+                      <div className="w-full rounded-lg overflow-hidden border border-black/30">
+                        <ThemeSwatch info={theme} />
+                      </div>
+                      <span className="text-xs">{theme.name}</span>
+                    </button>
+                  );
+                })}
 
                 <button
+                  type="button"
                   role="radio"
                   aria-checked={!!selectedExtraTheme}
-                  className="theme more-tile"
                   onClick={() => setMoreThemesOpen(true)}
                   title="21 more map themes"
+                  className={`p-2 rounded-xl border flex flex-col items-center justify-center space-y-1.5 transition-all cursor-pointer ${
+                    selectedExtraTheme
+                      ? 'bg-teal-500/15 border-teal-500 ring-2 ring-teal-500 text-teal-400 font-bold'
+                      : 'bg-[#1e293b] border-slate-700 text-slate-300 hover:border-teal-400'
+                  }`}
                 >
-                  <span className="more-face">
+                  <div className="w-full aspect-[5/3] rounded-lg overflow-hidden border border-dashed border-slate-600 bg-[#0f172a] flex items-center justify-center relative">
                     {selectedExtraTheme && <ThemeSwatch info={selectedExtraTheme} />}
-                    <span className="more-icon" aria-hidden="true">
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                    <span className="p-1.5 rounded-md bg-black/60 text-teal-400">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
                         <rect x="3" y="3" width="7.5" height="7.5" rx="2" />
                         <rect x="13.5" y="3" width="7.5" height="7.5" rx="2" />
                         <rect x="3" y="13.5" width="7.5" height="7.5" rx="2" />
                         <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2" />
                       </svg>
                     </span>
+                  </div>
+                  <span className="text-xs">
+                    {selectedExtraTheme ? selectedExtraTheme.name : 'More Styles'}
                   </span>
-                  <span>More</span>
                 </button>
               </div>
             </div>
 
-            <div className="group">
-              <div className="group-title">MAP DETAILS</div>
-              <label className="toggle">
-                Place names
-                <input
-                  type="checkbox"
-                  checked={mapLabels}
-                  onChange={(e) => updateActiveScene({ mapLabels: e.target.checked })}
-                />
-              </label>
+            {/* Map Details Visual Toggle Cards */}
+            <div className="space-y-2">
+              <span className="text-[11px] font-bold text-teal-400 uppercase tracking-wider block">
+                MAP DETAILS ?
+              </span>
+              {[
+                {
+                  label: 'Place names',
+                  desc: 'Show city, town, and peak labels',
+                  checked: mapLabels,
+                  onToggle: () => updateActiveScene({ mapLabels: !mapLabels }),
+                },
+                {
+                  label: 'Country & state borders',
+                  desc: 'Draw political and regional boundaries',
+                  checked: regions,
+                  onToggle: () => updateActiveScene({ regions: !regions }),
+                },
+                {
+                  label: '3D mountains',
+                  desc: 'Elevate terrain and hillshading in 3D',
+                  checked: terrain,
+                  onToggle: () => updateActiveScene({ terrain: !terrain }),
+                },
+              ].map((item) => (
+                <button
+                  key={item.label}
+                  type="button"
+                  onClick={item.onToggle}
+                  className={`w-full p-3 rounded-xl border flex items-center justify-between transition-all cursor-pointer ${
+                    item.checked
+                      ? 'bg-teal-500/15 border-teal-500 ring-1 ring-teal-500'
+                      : 'bg-[#1e293b] border-slate-700 hover:border-teal-400'
+                  }`}
+                >
+                  <div className="text-left">
+                    <strong className="text-xs text-slate-100 block">{item.label}</strong>
+                    <span className="text-[10px] text-slate-400">{item.desc}</span>
+                  </div>
+                  <div
+                    className={`w-5 h-5 rounded-md flex items-center justify-center border text-xs font-bold shrink-0 ml-2 ${
+                      item.checked
+                        ? 'bg-teal-500 border-teal-500 text-slate-950'
+                        : 'border-slate-600 bg-slate-800 text-transparent'
+                    }`}
+                  >
+                    ✓
+                  </div>
+                </button>
+              ))}
 
               {uiMode === 'advanced' && (mapLabels || regions) && (
-                <label className="toggle">
-                  Names in
+                <div className="p-3 rounded-xl bg-[#1e293b] border border-slate-700 flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-200">Names in</span>
                   <select
                     value={labelLang}
                     onChange={(e) =>
                       updateActiveScene({ labelLang: e.target.value || undefined })
                     }
+                    className="bg-[#0f172a] border border-slate-700 text-slate-200 text-xs rounded-lg px-2.5 py-1.5"
                   >
                     <option value="">Local names</option>
                     {LABEL_LANGUAGES.map((lang) => (
@@ -901,26 +1110,8 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                       </option>
                     ))}
                   </select>
-                </label>
+                </div>
               )}
-
-              <label className="toggle">
-                Country & state borders
-                <input
-                  type="checkbox"
-                  checked={regions}
-                  onChange={(e) => updateActiveScene({ regions: e.target.checked })}
-                />
-              </label>
-
-              <label className="toggle">
-                3D mountains
-                <input
-                  type="checkbox"
-                  checked={terrain}
-                  onChange={(e) => updateActiveScene({ terrain: e.target.checked })}
-                />
-              </label>
             </div>
 
             <div className="pt-4 mt-auto border-t border-slate-800 flex justify-end">
@@ -1103,11 +1294,12 @@ export const EditorPage: React.FC<EditorPageProps> = ({
         {currentStep === 'signs' && (
           <SignsEditorPanel
             signs={activeScene.signs}
+            routePoints={projectRoutes[0]?.points || canonicalRoute?.calculatedGeometry || []}
             defaultCenter={
-              activeScene.routes[0]?.points?.length
+              projectRoutes[0]?.points?.length
                 ? [
-                    activeScene.routes[0].points[Math.floor(activeScene.routes[0].points.length / 2)].lng,
-                    activeScene.routes[0].points[Math.floor(activeScene.routes[0].points.length / 2)].lat,
+                    projectRoutes[0].points[Math.floor(projectRoutes[0].points.length / 2)].lng,
+                    projectRoutes[0].points[Math.floor(projectRoutes[0].points.length / 2)].lat,
                   ]
                 : [15, 50]
             }
@@ -1129,160 +1321,63 @@ export const EditorPage: React.FC<EditorPageProps> = ({
           />
         )}
 
-        {/* Step 2: Camera Studio 2-Column Mode */}
-        {currentStep === 'camera' ? (
-          <div className="flex-1 flex h-full overflow-hidden bg-[#0f172a]">
-            {/* Left 60%: Live Preview */}
-            <div className="w-[60%] h-full p-6 flex flex-col justify-center items-center relative overflow-hidden">
-              <div
-                className={`relative rounded-2xl overflow-hidden shadow-2xl border border-slate-800 bg-[#020617] flex items-center justify-center transition-all duration-300 ${
-                  aspectRatio === '9:16'
-                    ? 'h-[74vh] aspect-[9/16] max-w-full'
-                    : aspectRatio === '1:1'
-                    ? 'h-[74vh] aspect-square max-w-full'
-                    : 'w-full aspect-[16/9] max-h-[74vh]'
-                }`}
-              >
-                <main ref={stageRef} className="w-full h-full relative">
-                  <MapViewer
-                    themeId={activeScene.mapThemeId}
-                    mapLabels={mapLabels}
-                    labelLang={labelLang || undefined}
-                    regions={regions}
-                    terrain={terrain}
-                    aspect={project.aspect}
-                    aspectRatio={aspectRatio}
-                    size={project.size}
-                    routes={activeScene.routes}
-                    signs={activeScene.signs}
-                    currentStep={currentStep}
-                    currentTime={currentTime}
-                    duration={duration}
-                    overlays={activeScene.overlays}
-                    cameraMode={cameraMode}
-                    cameraPreset={cameraPreset}
-                    followOrient={followOrient}
-                    rotateOffset={rotateOffset}
-                    followZoom={followZoom}
-                    tilt={tilt}
-                    lookAhead={lookAhead}
-                    distanceKm={distanceKm}
-                    heightKm={heightKm}
-                    orbitDirection={orbitDirection}
-                    cameraBlocks={activeScene.cameraBlocks}
-                    includeMapCredit={project.includeMapCredit ?? true}
-                    isPlaying={isPlaying}
-                    fitRouteRequested={fitRouteRequested}
-                    destinationPreview={destinationPreview}
-                    onUpdateRoute={handleUpdateRoute}
-                    onAddPoint={handleAddPoint}
-                    onAddSign={handleAddSign}
-                    onUpdateSign={handleUpdateSign}
-                    onMapCameraChange={handleMapCameraChange}
-                  />
-                </main>
-
-                {/* Aspect Ratio Badge Overlay */}
-                <div className="absolute top-3 left-3 bg-black/75 backdrop-blur-md px-2.5 py-1 rounded-md text-[11px] font-mono text-slate-300 pointer-events-none z-10 border border-white/10 shadow">
-                  {aspectRatio === '9:16'
-                    ? '9:16 · 1080×1920'
-                    : aspectRatio === '1:1'
-                    ? '1:1 · 1080×1080'
-                    : '16:9 · 1920×1080'}
-                </div>
-              </div>
-
-              {/* Live Preview Timeline Bar */}
-              <div className="w-full max-w-2xl mt-4 flex items-center space-x-3 bg-[#1e293b]/95 backdrop-blur border border-slate-700/80 px-4 py-2.5 rounded-xl shadow-lg z-10">
-                <button
-                  type="button"
-                  onClick={() => setIsPlaying(!isPlaying)}
-                  className="p-2 rounded-lg bg-teal-500/10 text-teal-400 hover:bg-teal-500/20 transition-colors cursor-pointer"
-                  title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
-                >
-                  {isPlaying ? (
-                    <Pause className="w-4 h-4 fill-current" />
-                  ) : (
-                    <Play className="w-4 h-4 fill-current ml-0.5" />
-                  )}
-                </button>
-
-                <span className="text-xs font-mono text-slate-300 min-w-[75px]">
-                  {formatTimelineClock(currentTime)} / {formatTimelineClock(duration)}
-                </span>
-
-                <input
-                  type="range"
-                  min={0}
-                  max={duration}
-                  step={0.1}
-                  value={currentTime}
-                  onChange={(e) => setCurrentTime(parseFloat(e.target.value))}
-                  className="flex-1 h-1.5 accent-teal-500 bg-slate-700 rounded-lg cursor-pointer"
-                />
-              </div>
-            </div>
-
-            {/* Right 40%: Camera Studio Configuration Panel */}
-            <div className="w-[40%] min-w-[360px] max-w-[460px] h-full overflow-y-auto bg-[#0f172a] border-l border-slate-800 p-6">
-              <CameraEditorPanel
-                cameraPreset={cameraPreset}
-                onSetCameraPreset={handleSetCameraPreset}
-                aspectRatio={aspectRatio}
-                onSetAspectRatio={handleSetAspectRatio}
-                durationPreset={durationPreset}
-                duration={duration}
-                onSetDuration={handleSetDuration}
-                cameraMode={cameraMode}
-                onSetCameraMode={(mode) => {
-                  setCameraMode(mode);
-                  handleUpdateActiveCameraBlock({ kind: mode });
-                }}
-                followOrient={followOrient}
-                onSetFollowOrient={(orient) => {
-                  setFollowOrient(orient);
-                  handleUpdateActiveCameraBlock({ followOrient: orient });
-                }}
-                rotateOffset={rotateOffset}
-                onSetRotateOffset={(deg) => {
-                  setRotateOffset(deg);
-                  handleUpdateActiveCameraBlock({ rotateOffset: deg, bearing: deg });
-                }}
-                followZoom={followZoom}
-                onSetFollowZoom={(z) => {
-                  setFollowZoom(z);
-                  handleUpdateActiveCameraBlock({ zoom: z });
-                }}
-                tilt={tilt}
-                onSetTilt={(t) => {
-                  setTilt(t);
-                  handleUpdateActiveCameraBlock({ pitch: t });
-                }}
-                distanceKm={distanceKm}
-                onSetDistanceKm={(d) => {
-                  setDistanceKm(d);
-                  handleUpdateActiveCameraBlock({ distanceKm: d });
-                }}
-                heightKm={heightKm}
-                onSetHeightKm={(h) => {
-                  setHeightKm(h);
-                  handleUpdateActiveCameraBlock({ heightKm: h });
-                }}
-                orbitDirection={orbitDirection}
-                onSetOrbitDirection={(dir) => {
-                  setOrbitDirection(dir);
-                  handleUpdateActiveCameraBlock({ orbitDirection: dir });
-                }}
-                currentTime={currentTime}
-                activeCameraBlock={activeCameraBlock}
-                onNext={() => setCurrentStep('map')}
-              />
-            </div>
-          </div>
-        ) : (
-          <>
-            {/* Step 8: Video ("Create my video!") */}
-            {currentStep === 'preview' && (
+        {/* Step 2: Camera ("How does the camera fly?") */}
+        {currentStep === 'camera' && (
+          <CameraEditorPanel
+            cameraPreset={cameraPreset}
+            onSetCameraPreset={handleSetCameraPreset}
+            aspectRatio={aspectRatio}
+            onSetAspectRatio={handleSetAspectRatio}
+            durationPreset={durationPreset}
+            duration={duration}
+            onSetDuration={handleSetDuration}
+            cameraMode={cameraMode}
+            onSetCameraMode={(mode) => {
+              setCameraMode(mode);
+              handleUpdateActiveCameraBlock({ kind: mode });
+            }}
+            followOrient={followOrient}
+            onSetFollowOrient={(orient) => {
+              setFollowOrient(orient);
+              handleUpdateActiveCameraBlock({ followOrient: orient });
+            }}
+            rotateOffset={rotateOffset}
+            onSetRotateOffset={(deg) => {
+              setRotateOffset(deg);
+              handleUpdateActiveCameraBlock({ rotateOffset: deg, bearing: deg });
+            }}
+            followZoom={followZoom}
+            onSetFollowZoom={(z) => {
+              setFollowZoom(z);
+              handleUpdateActiveCameraBlock({ zoom: z });
+            }}
+            tilt={tilt}
+            onSetTilt={(t) => {
+              setTilt(t);
+              handleUpdateActiveCameraBlock({ pitch: t });
+            }}
+            distanceKm={distanceKm}
+            onSetDistanceKm={(d) => {
+              setDistanceKm(d);
+              handleUpdateActiveCameraBlock({ distanceKm: d });
+            }}
+            heightKm={heightKm}
+            onSetHeightKm={(h) => {
+              setHeightKm(h);
+              handleUpdateActiveCameraBlock({ heightKm: h });
+            }}
+            orbitDirection={orbitDirection}
+            onSetOrbitDirection={(dir) => {
+              setOrbitDirection(dir);
+              handleUpdateActiveCameraBlock({ orbitDirection: dir });
+            }}
+            currentTime={currentTime}
+            activeCameraBlock={activeCameraBlock}
+            onNext={() => setCurrentStep('map')}
+          />
+        )}
+        {/* Step 8: Video ("Create my video!") */}
+        {currentStep === 'preview' && (
               <aside className="panel w-85 h-full overflow-y-auto p-5 flex flex-col space-y-5 text-xs bg-[#0f172a] border-r border-slate-800 text-slate-100">
                 <div>
                   <span className="text-[11px] font-bold tracking-wider text-teal-400 uppercase">
@@ -1317,7 +1412,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                 {/* Primary Create My Video CTA */}
                 <button
                   type="button"
-                  disabled={isRendering || activeScene.routes.every((r) => r.points.length === 0)}
+                  disabled={isRendering || projectRoutes.every((r) => r.points.length === 0)}
                   onClick={handleStartRender}
                   className="w-full py-3.5 px-5 rounded-xl bg-teal-500 hover:bg-teal-400 disabled:opacity-50 text-slate-950 font-extrabold text-sm shadow-xl shadow-teal-500/25 transition-all flex items-center justify-center space-x-2 cursor-pointer"
                 >
@@ -1425,48 +1520,491 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                 )}
               </aside>
             )}
+    </>
+  );
 
-            {/* 3D Map Stage */}
-            <main ref={stageRef} className="stage flex-1 h-full relative">
-              <MapViewer
-                themeId={activeScene.mapThemeId}
-                mapLabels={mapLabels}
-                labelLang={labelLang || undefined}
-                regions={regions}
-                terrain={terrain}
-                aspect={project.aspect}
-                aspectRatio={aspectRatio}
-                size={project.size}
-                routes={activeScene.routes}
-                signs={activeScene.signs}
+  const activeStepObj = steps.find((s) => s.id === currentStep);
+
+  return (
+    <div
+      className="editor h-screen w-screen max-w-full flex flex-col bg-[var(--bg)] text-[var(--text)] overflow-hidden"
+      data-experience={experience}
+      data-tier={tier}
+    >
+      {/* 1. Top Bar (Adaptive for Mobile / Tablet / Desktop) */}
+      {experience === 'mobile' ? (
+        <header className="topbar h-12 border-b border-[var(--border)] bg-[var(--panel)] px-2.5 flex items-center justify-between gap-1.5 z-30 shrink-0">
+          <div className="flex items-center gap-1.5 min-w-0 flex-1">
+            <button
+              type="button"
+              onClick={onBackToHome}
+              aria-label="Back to Projects"
+              className="min-w-[36px] min-h-[36px] px-2 rounded-lg bg-[var(--panel-2)] border border-[var(--border)] text-xs font-bold text-[var(--text)] flex items-center justify-center shrink-0"
+            >
+              ←
+            </button>
+            <input
+              className="project-title bg-transparent border border-transparent focus:border-[var(--accent)] font-bold text-xs text-[var(--text)] px-1.5 py-1 rounded min-w-0 flex-1 truncate"
+              value={project.name}
+              onChange={(e) =>
+                onUpdateProject((prev) => ({
+                  ...prev,
+                  name: e.target.value,
+                  updatedAt: Date.now(),
+                }))
+              }
+              aria-label="Project name"
+            />
+          </div>
+
+          <div className="flex items-center gap-1 shrink-0">
+            {/* Compact Simple / Advanced Toggle */}
+            <div className="flex items-center bg-[#0f172a] border border-slate-700 rounded-lg p-0.5 text-[10px]">
+              <button
+                type="button"
+                onClick={() => handleSetUIMode('simple')}
+                className={`px-1.5 py-1 rounded font-bold transition-all min-h-[28px] ${
+                  uiMode === 'simple'
+                    ? 'bg-teal-500 text-slate-950'
+                    : 'text-slate-400'
+                }`}
+              >
+                Simple
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSetUIMode('advanced')}
+                className={`px-1.5 py-1 rounded font-bold transition-all min-h-[28px] ${
+                  uiMode === 'advanced'
+                    ? 'bg-teal-500 text-slate-950'
+                    : 'text-slate-400'
+                }`}
+              >
+                Adv
+              </button>
+            </div>
+
+            {/* Compact Aspect Ratio */}
+            <select
+              value={project.aspect}
+              aria-label="Video aspect ratio"
+              onChange={(e) =>
+                onUpdateProject((prev) => ({
+                  ...prev,
+                  aspect: e.target.value as any,
+                  aspectRatio: e.target.value as any,
+                  updatedAt: Date.now(),
+                }))
+              }
+              className="bg-[var(--panel-2)] text-[var(--text)] text-[10px] font-bold border border-[var(--border)] rounded-lg px-1.5 py-1 min-h-[32px]"
+            >
+              <option value="16:9">16:9</option>
+              <option value="9:16">9:16</option>
+              <option value="1:1">1:1</option>
+              <option value="4:5">4:5</option>
+              <option value="21:9">21:9</option>
+            </select>
+
+            <button
+              type="button"
+              onClick={() => exportProjectFile(project)}
+              aria-label="Export project file"
+              title="Export .mapanim"
+              className="min-w-[32px] min-h-[32px] p-1.5 rounded-lg bg-[var(--panel-2)] border border-[var(--border)] text-[var(--text)] flex items-center justify-center"
+            >
+              <Download className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setHelpOpen(true)}
+              aria-label="Help and documentation"
+              title="Help"
+              className="min-w-[32px] min-h-[32px] p-1.5 rounded-lg bg-[var(--panel-2)] border border-[var(--border)] text-[var(--muted)] flex items-center justify-center"
+            >
+              <HelpCircle className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </header>
+      ) : (
+        <header className="topbar h-12 border-b border-[var(--border)] bg-[var(--panel)] px-3 xl:px-4 flex items-center justify-between gap-2 z-30 shrink-0">
+          <div className="flex items-center space-x-2 min-w-0">
+            <button
+              type="button"
+              className="back text-xs font-semibold text-[var(--muted)] hover:text-[var(--text)] transition-colors flex items-center space-x-1 shrink-0 min-h-[36px] px-1.5"
+              onClick={onBackToHome}
+            >
+              <span>← Projects</span>
+            </button>
+            <span className="text-[var(--border)]">/</span>
+            <input
+              className="project-title bg-transparent border-0 font-semibold text-sm text-[var(--text)] focus:ring-1 focus:ring-[var(--accent)] px-2 py-1 rounded w-36 lg:w-48 min-w-0 truncate"
+              value={project.name}
+              onChange={(e) =>
+                onUpdateProject((prev) => ({
+                  ...prev,
+                  name: e.target.value,
+                  updatedAt: Date.now(),
+                }))
+              }
+              aria-label="Project name"
+            />
+          </div>
+
+          {/* Multi-Scene Tabs */}
+          <div className="scene-tabs flex items-center space-x-1 overflow-x-auto no-scrollbar min-w-0">
+            {project.scenes.map((s, idx) => (
+              <div
+                key={s.id}
+                className={`flex items-center px-3 py-1 text-xs rounded-t font-medium transition-colors shrink-0 ${
+                  idx === activeSceneIndex
+                    ? 'border-b-2 border-[var(--accent)] bg-[var(--panel-2)] text-[var(--text)]'
+                    : 'text-[var(--muted)] hover:text-[var(--text)]'
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveSceneIndex(idx);
+                  }}
+                  className="mr-1"
+                >
+                  Scene {idx + 1}
+                </button>
+                {project.scenes.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteScene(idx);
+                    }}
+                    className="ml-1 text-[var(--muted)] hover:text-red-400 font-bold text-xs"
+                    title={`Delete Scene ${idx + 1}`}
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            ))}
+            <button
+              onClick={handleAddScene}
+              className="px-2 py-1 text-xs text-[var(--muted)] hover:text-[var(--text)] font-medium shrink-0"
+              title="Add a new scene"
+            >
+              +
+            </button>
+          </div>
+
+          <div className="flex items-center space-x-2 shrink-0">
+            {/* Export .mapanim Project File */}
+            <button
+              type="button"
+              onClick={async () => {
+                const blob = await projectStorage.exportProjectFile(project.id);
+                const url = URL.createObjectURL(blob);
+                const safeName = project.name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-') || 'project';
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${safeName}.mapanim`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+              }}
+              className="text-xs px-2.5 py-1.5 rounded border border-[var(--border)] hover:bg-[var(--panel-2)] text-[var(--text)] flex items-center space-x-1 min-h-[34px]"
+              title="Download project as .mapanim file"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Export .mapanim</span>
+            </button>
+
+            <a
+              className="donate-mini text-xs px-2.5 py-1.5 rounded border border-[var(--border)] hover:bg-[var(--panel-2)] text-[var(--text)] min-h-[34px] flex items-center"
+              href="https://www.paypal.com/donate/?hosted_button_id=4Z34EYQP2T548"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              ❤️ <span className="hidden lg:inline ml-1">Donate</span>
+            </a>
+          </div>
+        </header>
+      )}
+
+      {/* 2. Step Bar (Desktop & Tablet 8-Step Workflow) */}
+      {experience !== 'mobile' && (
+        <nav
+          aria-label="Editor workflow steps"
+          className="stepbar h-11 border-b border-[var(--border)] bg-[var(--panel-2)] px-2.5 xl:px-4 flex items-center justify-between gap-2 z-20 shrink-0"
+        >
+          <div className="flex items-center gap-1.5 min-w-0 flex-1">
+            {/* Tablet Collapsible Drawer Toggle Button */}
+            {experience === 'tablet' && (
+              <button
+                type="button"
+                onClick={() => setTabletDrawerOpen((v) => !v)}
+                aria-expanded={tabletDrawerOpen}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border transition-all shrink-0 min-h-[36px] cursor-pointer ${
+                  tabletDrawerOpen
+                    ? 'bg-teal-500/15 border-teal-500 text-teal-400'
+                    : 'bg-[var(--panel)] border-[var(--border)] text-[var(--text)]'
+                }`}
+                title={tabletDrawerOpen ? 'Collapse editing panel' : 'Open editing panel'}
+              >
+                {tabletDrawerOpen ? (
+                  <PanelLeftClose className="w-4 h-4" />
+                ) : (
+                  <PanelLeftOpen className="w-4 h-4" />
+                )}
+                <span className="hidden md:inline">Panel</span>
+              </button>
+            )}
+
+            <div className="steps flex items-center space-x-1 overflow-x-auto no-scrollbar min-w-0 py-0.5">
+              {steps.map((s) => {
+                const isActive = currentStep === s.id;
+                return (
+                  <button
+                    key={s.id}
+                    onClick={() => {
+                      setCurrentStep(s.id);
+                      if (experience === 'tablet') setTabletDrawerOpen(true);
+                    }}
+                    className={`step px-2 xl:px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center space-x-1 xl:space-x-1.5 shrink-0 min-h-[34px] ${
+                      isActive
+                        ? 'active bg-[var(--panel)] text-[var(--accent)] shadow-sm border border-[var(--border)]'
+                        : 'text-[var(--muted)] hover:text-[var(--text)] hover:bg-[var(--panel)]'
+                    }`}
+                  >
+                    <span className="num opacity-60 text-[10px]">{s.num}</span>
+                    <span>{s.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="stepbar-right flex items-center space-x-2 xl:space-x-3 shrink-0">
+            {/* Simple Mode vs Advanced Mode Toggle */}
+            <div className="flex items-center bg-[#0f172a] border border-slate-700 rounded-lg p-0.5 text-[11px]">
+              <button
+                type="button"
+                onClick={() => handleSetUIMode('simple')}
+                className={`px-2 xl:px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer ${
+                  uiMode === 'simple'
+                    ? 'bg-teal-500 text-slate-950 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+                title="Simple Mode: Easy travel video maker"
+              >
+                ✨ Simple
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSetUIMode('advanced')}
+                className={`px-2 xl:px-2.5 py-1 rounded-md font-semibold transition-all cursor-pointer ${
+                  uiMode === 'advanced'
+                    ? 'bg-teal-500 text-slate-950 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+                title="Advanced Mode: Full camera, route, map and rendering controls"
+              >
+                ⚙️ Advanced
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setHelpOpen(true)}
+              className="shortcuts-btn text-xs text-[var(--muted)] hover:text-[var(--text)] flex items-center space-x-1.5 px-2 py-1.5 rounded border border-[var(--border)] min-h-[32px]"
+              title="Help & Keyboard shortcuts (?)"
+            >
+              <HelpCircle className="w-3.5 h-3.5" />
+              <span className="shortcuts-label hidden xl:inline">Help & Shortcuts</span>
+            </button>
+
+            <label className="aspect-pick flex items-center space-x-1.5 text-xs text-[var(--muted)] cursor-pointer">
+              <span className="shape-icon hidden xl:inline-block w-3.5 h-2.5 border border-current rounded-sm"></span>
+              <select
+                value={project.aspect}
+                aria-label="Aspect ratio"
+                onChange={(e) =>
+                  onUpdateProject((prev) => ({
+                    ...prev,
+                    aspect: e.target.value as any,
+                    aspectRatio: e.target.value as any,
+                    updatedAt: Date.now(),
+                  }))
+                }
+                className="bg-[var(--panel)] text-[var(--text)] text-xs border border-[var(--border)] rounded px-2 py-1 focus:ring-1 focus:ring-[var(--accent)] min-h-[32px]"
+              >
+                <option value="16:9">16:9 Landscape</option>
+                <option value="9:16">9:16 Portrait</option>
+                <option value="1:1">1:1 Square</option>
+                <option value="4:5">4:5 Instagram</option>
+                <option value="21:9">21:9 Cinema</option>
+              </select>
+            </label>
+          </div>
+        </nav>
+      )}
+
+      {/* 3. Main Workspace (Preserves single MapViewer instance across all breakpoints) */}
+      <div
+        className={`workspace-wrap flex-1 flex relative overflow-hidden min-h-0 ${
+          experience === 'mobile' ? 'flex-col' : 'flex-row'
+        }`}
+      >
+        {/* Slot 0: Active Editor Panel Container (Desktop Sidebar / Tablet Collapsible Drawer / Mobile Bottom Sheet) */}
+        <div
+          key="panel-slot"
+          className={
+            experience === 'mobile'
+              ? `mobile-sheet-wrap order-2 w-full flex flex-col bg-[#0f172a] overflow-hidden transition-all duration-200 ${
+                  mobileSheetSnap === 'map'
+                    ? 'h-auto shrink-0'
+                    : mobileSheetSnap === 'full'
+                    ? 'flex-1 min-h-0'
+                    : 'h-[56%] shrink-0'
+                }`
+              : 'order-1 h-full shrink-0'
+          }
+        >
+          {experience === 'desktop' && activeStepPanel}
+
+          {experience === 'tablet' && (
+            <TabletDrawerContainer
+              isOpen={tabletDrawerOpen}
+              onToggle={() => setTabletDrawerOpen((v) => !v)}
+              isOverlayMode={tier === 'tablet-portrait'}
+              activeStepLabel={activeStepObj?.label || 'Editor'}
+            >
+              {activeStepPanel}
+            </TabletDrawerContainer>
+          )}
+
+          {experience === 'mobile' && (
+            <>
+              {/* Compact Mobile Playback & Timeline Strip */}
+              <div className="h-10 px-2.5 bg-[#16191e] border-t border-slate-800 flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setIsPlaying(!isPlaying)}
+                  aria-label={isPlaying ? 'Pause' : 'Play'}
+                  className="w-7 h-7 rounded-full bg-[var(--accent)] text-[var(--accent-ink)] flex items-center justify-center shrink-0"
+                >
+                  {isPlaying ? (
+                    <Pause className="w-3.5 h-3.5 fill-current" />
+                  ) : (
+                    <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+                  )}
+                </button>
+                <input
+                  type="range"
+                  min={0}
+                  max={duration}
+                  step={0.1}
+                  value={currentTime}
+                  onChange={(e) => setCurrentTime(parseFloat(e.target.value))}
+                  aria-label="Timeline scrubber"
+                  className="flex-1 min-w-0 h-1.5 bg-[var(--panel-2)] rounded-lg appearance-none cursor-pointer accent-[var(--accent)]"
+                />
+                <span className="text-[10px] font-mono text-slate-400 shrink-0">
+                  {currentTime.toFixed(1)}s/{duration}s
+                </span>
+                {currentStep === 'camera' && (
+                  <button
+                    type="button"
+                    onClick={() => handleAddCameraBlock(cameraMode)}
+                    className="px-2 py-1 rounded bg-teal-500 text-slate-950 font-bold text-[10px] shrink-0"
+                    title="Add camera keyframe at playhead"
+                  >
+                    +Cam
+                  </button>
+                )}
+              </div>
+
+              <MobileSheetHeader
                 currentStep={currentStep}
-                currentTime={currentTime}
-                duration={duration}
-                overlays={activeScene.overlays}
-                cameraMode={cameraMode}
-                cameraPreset={cameraPreset}
-                followOrient={followOrient}
-                rotateOffset={rotateOffset}
-                followZoom={followZoom}
-                tilt={tilt}
-                lookAhead={lookAhead}
-                distanceKm={distanceKm}
-                heightKm={heightKm}
-                orbitDirection={orbitDirection}
-                cameraBlocks={activeScene.cameraBlocks}
-                includeMapCredit={project.includeMapCredit ?? true}
-                isPlaying={isPlaying}
-                fitRouteRequested={fitRouteRequested}
-                destinationPreview={destinationPreview}
-                onUpdateRoute={handleUpdateRoute}
-                onAddPoint={handleAddPoint}
-                onAddSign={handleAddSign}
-                onUpdateSign={handleUpdateSign}
-                onMapCameraChange={handleMapCameraChange}
+                onSelectStep={(s) => {
+                  setCurrentStep(s);
+                  if (mobileSheetSnap === 'map') setMobileSheetSnap('split');
+                }}
+                sheetSnap={mobileSheetSnap}
+                onSetSheetSnap={setMobileSheetSnap}
               />
-            </main>
-          </>
-        )}
+
+              {mobileSheetSnap !== 'map' && (
+                <div className="mobile-panel-scroll flex-1 overflow-y-auto overflow-x-hidden">
+                  {activeStepPanel}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Slot 1: 3D Map Stage (Always mounted in identical DOM position) */}
+        <main
+          key="stage-slot"
+          ref={stageRef}
+          className={`stage relative min-w-0 ${
+            experience === 'mobile'
+              ? mobileSheetSnap === 'full'
+                ? 'order-1 h-[22%] min-h-[100px] w-full shrink-0'
+                : 'order-1 flex-1 w-full min-h-[150px]'
+              : 'order-2 flex-1 h-full'
+          }`}
+        >
+          <MapViewer
+            themeId={activeScene.mapThemeId}
+            mapLabels={mapLabels}
+            labelLang={labelLang || undefined}
+            regions={regions}
+            terrain={terrain}
+            aspect={project.aspect}
+            aspectRatio={aspectRatio}
+            size={project.size}
+            routes={projectRoutes}
+            signs={activeScene.signs}
+            currentStep={currentStep}
+            currentTime={currentTime}
+            duration={duration}
+            overlays={activeScene.overlays}
+            cameraMode={cameraMode}
+            cameraPreset={cameraPreset}
+            followOrient={followOrient}
+            rotateOffset={rotateOffset}
+            followZoom={followZoom}
+            tilt={tilt}
+            lookAhead={lookAhead}
+            distanceKm={distanceKm}
+            heightKm={heightKm}
+            orbitDirection={orbitDirection}
+            cameraBlocks={activeScene.cameraBlocks}
+            includeMapCredit={project.includeMapCredit ?? true}
+            isPlaying={isPlaying}
+            fitRouteRequested={fitRouteRequested}
+            destinationPreview={destinationPreview}
+            isQuickPreviewActive={quickPreviewState !== 'idle'}
+            quickPreviewProgress={quickPreviewProgress}
+            quickPreviewRemainingDistance={
+              quickPreviewState !== 'idle'
+                ? `${remainingPreviewDistanceKm.toFixed(1)} km`
+                : undefined
+            }
+            canonicalRoute={canonicalRoute}
+            onUpdateCanonicalRoute={handleUpdateCanonicalRoute}
+            onUpdateOverlays={handleUpdateOverlays}
+            onUpdateRoute={handleUpdateRoute}
+            onAddPoint={handleAddPoint}
+            onAddSign={handleAddSign}
+            onUpdateSign={handleUpdateSign}
+            onMapCameraChange={handleMapCameraChange}
+            onStartInteraction={beginTrackingInteraction}
+            onMoveInteraction={notifyInteractionMoved}
+            onEndInteraction={endTrackingInteraction}
+            onCancelInteraction={cancelTrackingInteraction}
+          />
+        </main>
       </div>
 
       {/* Render Progress Scrim Dialog */}
@@ -1547,139 +2085,164 @@ export const EditorPage: React.FC<EditorPageProps> = ({
           document.body
         )}
 
-      {/* 4. Bottom Timeline Scrubber */}
-      <footer className="timeline h-16 border-t border-[var(--border)] bg-[var(--panel)] px-6 flex items-center space-x-6 z-20">
-        <button
-          type="button"
-          onClick={() => setIsPlaying(!isPlaying)}
-          className="w-9 h-9 rounded-full bg-[var(--accent)] hover:bg-[#ff6930] text-[var(--accent-ink)] flex items-center justify-center shadow-md transition-transform active:scale-95"
-          title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
-        >
-          {isPlaying ? (
-            <Pause className="w-4 h-4 fill-current" />
-          ) : (
-            <Play className="w-4 h-4 fill-current ml-0.5" />
-          )}
-        </button>
-
-        <div className="flex-1 flex flex-col space-y-1 relative">
-          <div className="flex justify-between text-[11px] text-[var(--muted)] font-mono">
-            <span>{currentTime.toFixed(1)}s</span>
-            <span>{duration.toFixed(1)}s</span>
-          </div>
-          <div className="relative flex items-center">
-            <input
-              type="range"
-              min={0}
-              max={duration}
-              step={0.1}
-              value={currentTime}
-              onChange={(e) => setCurrentTime(parseFloat(e.target.value))}
-              className="w-full h-1.5 bg-[var(--panel-2)] rounded-lg appearance-none cursor-pointer accent-[var(--accent)]"
-            />
-          </div>
-
-          {/* Camera keyframe blocks lane (matching snapshots & native classes) */}
-          {(currentStep === 'camera' || (activeScene.cameraBlocks && activeScene.cameraBlocks.length > 0)) && (
-            <div className="relative w-full h-6 bg-[var(--panel-2)]/60 rounded border border-[var(--border)] overflow-hidden flex items-center mt-0.5">
-              {sortedCameraBlocks.map((cb, idx) => {
-                const nextCb = sortedCameraBlocks[idx + 1];
-                const startPct = cb.tRatio * 100;
-                const endPct = nextCb ? nextCb.tRatio * 100 : 100;
-                const widthPct = Math.max(1, endPct - startPct);
-                const isCurrent = activeCameraBlock?.id === cb.id;
-
-                return (
-                  <div
-                    key={cb.id}
-                    className={`bar cam-block ${cb.kind} ${isCurrent ? 'current' : ''}`}
-                    style={{
-                      position: 'absolute',
-                      left: `${startPct}%`,
-                      width: `${widthPct}%`,
-                      height: '100%',
-                      cursor: 'pointer',
-                    }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setCurrentTime(cb.tRatio * duration);
-                      setCameraMode(cb.kind);
-                      if (cb.pitch !== undefined) setTilt(cb.pitch);
-                      if (cb.zoom !== undefined) setFollowZoom(cb.zoom);
-                      if (cb.rotateOffset !== undefined) setRotateOffset(cb.rotateOffset);
-                      if (cb.followOrient !== undefined) setFollowOrient(cb.followOrient);
-                      if (cb.distanceKm !== undefined) setDistanceKm(cb.distanceKm);
-                      if (cb.heightKm !== undefined) setHeightKm(cb.heightKm);
-                      if (cb.orbitDirection !== undefined) setOrbitDirection(cb.orbitDirection);
-                    }}
-                    title={`Camera ${cb.kind} from ${formatTimeSec(cb.tRatio * duration)}`}
-                  >
-                    <span className="cam-title text-[11px] font-semibold capitalize pl-1.5">
-                      {cb.kind}
-                    </span>
-                    <span className="cam-sub text-[10px] opacity-75 font-mono ml-1">
-                      from {formatTimeSec(cb.tRatio * duration)}
-                    </span>
-                    <button
-                      type="button"
-                      className="cam-delete"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDeleteCameraBlock(cb.id);
-                      }}
-                      title="Delete this camera block (×)"
-                    >
-                      ×
-                    </button>
-                  </div>
-                );
-              })}
-
-              {/* Camera '+' add button on playhead */}
-              {currentStep === 'camera' && (
-                <button
-                  type="button"
-                  className="cam-add"
-                  style={{ left: `${(currentTime / duration) * 100}%` }}
-                  onClick={() => handleAddCameraBlock(cameraMode)}
-                  title="Add camera block at playhead (+ or press N)"
-                >
-                  +
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div className="flex items-center space-x-2">
-          <select
-            value={duration}
-            onChange={(e) => updateActiveScene({ duration: Number(e.target.value) })}
-            className="text-xs font-semibold text-[var(--text)] px-2 py-1 bg-[var(--panel-2)] rounded-md border border-[var(--border)]"
-            title="Scene animation duration"
-          >
-            <option value={5}>5s</option>
-            <option value={10}>10s</option>
-            <option value={15}>15s</option>
-            <option value={20}>20s</option>
-            <option value={30}>30s</option>
-            <option value={45}>45s</option>
-            <option value={60}>60s</option>
-            <option value={120}>120s</option>
-          </select>
-
+      {/* 4. Bottom Navigation (Mobile 4-Stage Bar) OR Timeline Scrubber (Tablet / Desktop) */}
+      {experience === 'mobile' ? (
+        <MobileBottomStageBar
+          currentStep={currentStep}
+          onSelectStage={handleSelectMobileStage}
+        />
+      ) : (
+        <footer className="timeline h-16 border-t border-[var(--border)] bg-[var(--panel)] px-4 xl:px-6 flex items-center space-x-4 xl:space-x-6 z-20 shrink-0">
           <button
             type="button"
-            onClick={() =>
-              setPlaybackSpeed((s) => (s === 1 ? 2 : s === 2 ? 0.5 : 1))
+            onClick={() => {
+              if (currentStep === 'route') {
+                if (quickPreviewState === 'playing') {
+                  pauseQuickPreview();
+                } else if (quickPreviewState === 'paused') {
+                  resumeQuickPreview();
+                } else if (quickPreviewState === 'finished') {
+                  restartQuickPreview();
+                } else {
+                  startQuickPreview();
+                }
+              } else {
+                setIsPlaying(!isPlaying);
+              }
+            }}
+            className="w-9 h-9 rounded-full bg-[var(--accent)] hover:bg-[#ff6930] text-[var(--accent-ink)] flex items-center justify-center shadow-md transition-transform active:scale-95 shrink-0"
+            title={
+              currentStep === 'route'
+                ? (quickPreviewState === 'playing' ? 'Pause Route Preview' : 'Play Route Preview')
+                : (isPlaying ? 'Pause (Space)' : 'Play (Space)')
             }
-            className="speed-dial text-xs font-semibold text-[var(--muted)] hover:text-[var(--text)] px-3 py-1 bg-[var(--panel-2)] rounded-md border border-[var(--border)] transition-colors"
-            title="Click to cycle preview speed (0.5x / 1.0x / 2.0x)"
           >
-            {playbackSpeed.toFixed(1)}x Speed
+            {(currentStep === 'route' ? quickPreviewState === 'playing' : isPlaying) ? (
+              <Pause className="w-4 h-4 fill-current" />
+            ) : (
+              <Play className="w-4 h-4 fill-current ml-0.5" />
+            )}
           </button>
-        </div>
-      </footer>
+
+          <div className="flex-1 flex flex-col space-y-1 relative min-w-0">
+            <div className="flex justify-between text-[11px] text-[var(--muted)] font-mono">
+              <span>{currentTime.toFixed(1)}s</span>
+              <span>{duration.toFixed(1)}s</span>
+            </div>
+            <div className="relative flex items-center">
+              <input
+                type="range"
+                min={0}
+                max={duration}
+                step={0.1}
+                value={currentTime}
+                onChange={(e) => setCurrentTime(parseFloat(e.target.value))}
+                className="w-full h-1.5 bg-[var(--panel-2)] rounded-lg appearance-none cursor-pointer accent-[var(--accent)]"
+              />
+            </div>
+
+            {/* Camera keyframe blocks lane (matching snapshots & native classes) */}
+            {(currentStep === 'camera' || (activeScene.cameraBlocks && activeScene.cameraBlocks.length > 0)) && (
+              <div className="relative w-full h-6 bg-[var(--panel-2)]/60 rounded border border-[var(--border)] overflow-hidden flex items-center mt-0.5">
+                {sortedCameraBlocks.map((cb, idx) => {
+                  const nextCb = sortedCameraBlocks[idx + 1];
+                  const startPct = cb.tRatio * 100;
+                  const endPct = nextCb ? nextCb.tRatio * 100 : 100;
+                  const widthPct = Math.max(1, endPct - startPct);
+                  const isCurrent = activeCameraBlock?.id === cb.id;
+
+                  return (
+                    <div
+                      key={cb.id}
+                      className={`bar cam-block ${cb.kind} ${isCurrent ? 'current' : ''}`}
+                      style={{
+                        position: 'absolute',
+                        left: `${startPct}%`,
+                        width: `${widthPct}%`,
+                        height: '100%',
+                        cursor: 'pointer',
+                      }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setCurrentTime(cb.tRatio * duration);
+                        setCameraMode(cb.kind);
+                        if (cb.pitch !== undefined) setTilt(cb.pitch);
+                        if (cb.zoom !== undefined) setFollowZoom(cb.zoom);
+                        if (cb.rotateOffset !== undefined) setRotateOffset(cb.rotateOffset);
+                        if (cb.followOrient !== undefined) setFollowOrient(cb.followOrient);
+                        if (cb.distanceKm !== undefined) setDistanceKm(cb.distanceKm);
+                        if (cb.heightKm !== undefined) setHeightKm(cb.heightKm);
+                        if (cb.orbitDirection !== undefined) setOrbitDirection(cb.orbitDirection);
+                      }}
+                      title={`Camera ${cb.kind} from ${formatTimeSec(cb.tRatio * duration)}`}
+                    >
+                      <span className="cam-title text-[11px] font-semibold capitalize pl-1.5">
+                        {cb.kind}
+                      </span>
+                      <span className="cam-sub text-[10px] opacity-75 font-mono ml-1">
+                        from {formatTimeSec(cb.tRatio * duration)}
+                      </span>
+                      <button
+                        type="button"
+                        className="cam-delete"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteCameraBlock(cb.id);
+                        }}
+                        title="Delete this camera block (×)"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  );
+                })}
+
+                {/* Camera '+' add button on playhead */}
+                {currentStep === 'camera' && (
+                  <button
+                    type="button"
+                    className="cam-add"
+                    style={{ left: `${(currentTime / duration) * 100}%` }}
+                    onClick={() => handleAddCameraBlock(cameraMode)}
+                    title="Add camera block at playhead (+ or press N)"
+                  >
+                    +
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center space-x-2 shrink-0">
+            <select
+              value={duration}
+              onChange={(e) => updateActiveScene({ duration: Number(e.target.value) })}
+              className="text-xs font-semibold text-[var(--text)] px-2 py-1 bg-[var(--panel-2)] rounded-md border border-[var(--border)] min-h-[32px]"
+              title="Scene animation duration"
+            >
+              <option value={5}>5s</option>
+              <option value={10}>10s</option>
+              <option value={15}>15s</option>
+              <option value={20}>20s</option>
+              <option value={30}>30s</option>
+              <option value={45}>45s</option>
+              <option value={60}>60s</option>
+              <option value={120}>120s</option>
+            </select>
+
+            <button
+              type="button"
+              onClick={() =>
+                setPlaybackSpeed((s) => (s === 1 ? 2 : s === 2 ? 0.5 : 1))
+              }
+              className="speed-dial text-xs font-semibold text-[var(--muted)] hover:text-[var(--text)] px-3 py-1 bg-[var(--panel-2)] rounded-md border border-[var(--border)] transition-colors min-h-[32px]"
+              title="Click to cycle preview speed (0.5x / 1.0x / 2.0x)"
+            >
+              {playbackSpeed.toFixed(1)}x Speed
+            </button>
+          </div>
+        </footer>
+      )}
 
       {/* Help & Keyboard Shortcuts Modal Dialog (Official Help Document) */}
       {helpOpen &&

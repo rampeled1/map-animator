@@ -1,12 +1,13 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
-import { Route, MapSign, CameraBlock, StepId, OverlayConfig, TransportType, CameraModePreset, AspectRatioOption, DestinationPreview } from '../types';
+import { Route, MapSign, CameraBlock, StepId, OverlayConfig, TransportType, CameraModePreset, AspectRatioOption, DestinationPreview, CanonicalRoute } from '../types';
 import { buildMapStyle } from '../utils/mapStyleBuilder';
 import { calculateTrackStats } from '../utils/gpxParser';
 import { ThreeMapLayer } from '../utils/threeMapLayer';
 import { ModelKind3D } from '../utils/vehicle3DManager';
 import { getSmoothSnakePath } from '../utils/snakePathInterpolation';
 import { computeRouteBounds } from '../utils/cameraPresetMapper';
+import { WaypointOptionsModal } from './WaypointOptionsModal';
 
 function mapTransportTo3DModel(transport?: TransportType): ModelKind3D {
   if (!transport) return 'tank';
@@ -51,6 +52,12 @@ interface MapViewerProps {
   isPlaying?: boolean;
   fitRouteRequested?: Route | null;
   destinationPreview?: DestinationPreview | null;
+  isQuickPreviewActive?: boolean;
+  quickPreviewProgress?: number;
+  quickPreviewRemainingDistance?: string;
+  canonicalRoute?: CanonicalRoute;
+  onUpdateCanonicalRoute?: (route: CanonicalRoute) => void;
+  onUpdateOverlays?: (overlays: OverlayConfig) => void;
   onUpdateRoute?: (route: Route) => void;
   onAddPoint?: (point: { lng: number; lat: number }) => void;
   onAddSign?: (sign: MapSign) => void;
@@ -61,6 +68,10 @@ interface MapViewerProps {
     bearing: number;
     center: [number, number];
   }) => void;
+  onStartInteraction?: () => void;
+  onMoveInteraction?: () => void;
+  onEndInteraction?: () => void;
+  onCancelInteraction?: () => void;
 }
 
 interface SearchPlace {
@@ -422,11 +433,21 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   isPlaying,
   fitRouteRequested,
   destinationPreview,
+  isQuickPreviewActive,
+  quickPreviewProgress,
+  quickPreviewRemainingDistance,
+  canonicalRoute,
+  onUpdateCanonicalRoute,
+  onUpdateOverlays,
   onUpdateRoute,
   onAddPoint,
   onAddSign,
   onUpdateSign,
   onMapCameraChange,
+  onStartInteraction,
+  onMoveInteraction,
+  onEndInteraction,
+  onCancelInteraction,
 }) => {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -445,14 +466,48 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   onAddSignRef.current = onAddSign;
   const onUpdateSignRef = useRef(onUpdateSign);
   onUpdateSignRef.current = onUpdateSign;
+  const signsRef = useRef(signs);
+  signsRef.current = signs;
+  const canonicalRouteRef = useRef(canonicalRoute);
+  canonicalRouteRef.current = canonicalRoute;
+  const onUpdateCanonicalRouteRef = useRef(onUpdateCanonicalRoute);
+  onUpdateCanonicalRouteRef.current = onUpdateCanonicalRoute;
+  const onUpdateOverlaysRef = useRef(onUpdateOverlays);
+  onUpdateOverlaysRef.current = onUpdateOverlays;
+  const overlaysRef = useRef(overlays);
+  overlaysRef.current = overlays;
+  const lastWholeTourKeyRef = useRef<string>('');
+  const onCancelInteractionRef = useRef(onCancelInteraction);
+  onCancelInteractionRef.current = onCancelInteraction;
   const currentStepRef = useRef<StepId>(currentStep);
   currentStepRef.current = currentStep;
 
   const [viewSize, setViewSize] = useState({ w: 0, h: 0 });
   const [, setRenderTick] = useState(0);
   const [draggingPoint, setDraggingPoint] = useState<{ routeId: string; index: number } | null>(null);
+  const [draggingStopId, setDraggingStopId] = useState<string | null>(null);
+  const [draggingTitle, setDraggingTitle] = useState(false);
   const [draggingSignId, setDraggingSignId] = useState<string | null>(null);
+  const [editingWaypoint, setEditingWaypoint] = useState<{ routeId: string; index: number } | null>(null);
   const didDragRef = useRef(false);
+  const activePointerIdRef = useRef<number | null>(null);
+  const hasPointerCaptureRef = useRef<boolean>(false);
+  const fallbackCleanupRef = useRef<(() => void) | null>(null);
+
+  // Component unmount / cleanup safety: remove fallback listeners and cancel dangling interactions
+  useEffect(() => {
+    return () => {
+      if (fallbackCleanupRef.current) {
+        fallbackCleanupRef.current();
+        fallbackCleanupRef.current = null;
+      }
+      if (activePointerIdRef.current !== null) {
+        activePointerIdRef.current = null;
+        hasPointerCaptureRef.current = false;
+        onCancelInteractionRef.current?.();
+      }
+    };
+  }, []);
 
   // Fit bounds when explicitly requested (Show route in Route step menu)
   useEffect(() => {
@@ -477,7 +532,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     );
   }, [fitRouteRequested]);
 
-  // Click handler for route waypoints to set Pause, toggle sharp corner, add leg, or delete point
+  // Click handler for route waypoints to open accessible WaypointOptionsModal
   const handlePointClick = (routeId: string, ptIndex: number) => {
     if (didDragRef.current) {
       didDragRef.current = false;
@@ -485,52 +540,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     }
     const route = routes.find((r) => r.id === routeId);
     if (!route) return;
-    const pt = route.points[ptIndex];
-    const currentPause = pt.pauseSec || 0;
-    const input = prompt(
-      `Point #${ptIndex + 1} options:\n• Enter pause in seconds (0.5 to 20, or 0 for none)\n• Type 'sharp' to toggle sharp corner\n• Type 'leg:ferry' (or plane, train, boat, walking) to change transport from here\n• Type 'del' to delete this point:`,
-      currentPause > 0 ? String(currentPause) : '2'
-    );
-    if (input === null) return;
-    const trimmed = input.trim().toLowerCase();
-    if (trimmed === 'sharp') {
-      const updatedPts = [...route.points];
-      updatedPts[ptIndex] = { ...pt, sharpCorner: !pt.sharpCorner };
-      onUpdateRouteRef.current?.({ ...route, points: updatedPts });
-      return;
-    }
-    if (trimmed === 'del' || trimmed === 'delete') {
-      const updatedPts = route.points.filter((_, i) => i !== ptIndex);
-      onUpdateRouteRef.current?.({
-        ...route,
-        points: updatedPts,
-        stats: calculateTrackStats(updatedPts),
-      });
-      return;
-    }
-    if (trimmed.startsWith('leg:')) {
-      const transport = trimmed.slice(4).trim() as TransportType;
-      if (transport) {
-        const newLeg = {
-          id: `leg-${Date.now()}`,
-          fromPointIndex: ptIndex,
-          transportType: transport,
-          use3dSymbol: true,
-          color: route.color,
-        };
-        onUpdateRouteRef.current?.({
-          ...route,
-          legs: [...(route.legs || []), newLeg],
-        });
-      }
-      return;
-    }
-    const sec = parseFloat(trimmed);
-    if (!isNaN(sec)) {
-      const updatedPts = [...route.points];
-      updatedPts[ptIndex] = { ...pt, pauseSec: sec > 0 ? Math.min(20, Math.max(0.5, sec)) : 0 };
-      onUpdateRouteRef.current?.({ ...route, points: updatedPts });
-    }
+    setEditingWaypoint({ routeId, index: ptIndex });
   };
 
   const handlePointDoubleClick = (routeId: string, ptIndex: number) => {
@@ -558,6 +568,9 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       setViewSize({
         w: entry.contentRect.width,
         h: entry.contentRect.height,
+      });
+      requestAnimationFrame(() => {
+        mapRef.current?.resize();
       });
     });
     ro.observe(el);
@@ -675,9 +688,11 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   // Synchronize ThreeMapLayer with route geometry and animation progress
   useEffect(() => {
     const progress =
-      duration && duration > 0 && currentTime !== undefined
-        ? Math.min(1, Math.max(0, currentTime / duration))
-        : 1;
+      isQuickPreviewActive && quickPreviewProgress !== undefined
+        ? Math.min(1, Math.max(0, quickPreviewProgress))
+        : (duration && duration > 0 && currentTime !== undefined
+          ? Math.min(1, Math.max(0, currentTime / duration))
+          : 1);
     progressRef.current = progress;
 
     if (threeMapLayerRef.current && routes[0]?.points?.length) {
@@ -687,7 +702,45 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       threeMapLayerRef.current.setProgress(progress);
       mapRef.current?.triggerRepaint();
     }
-  }, [routes, currentTime, duration]);
+  }, [routes, currentTime, duration, isQuickPreviewActive, quickPreviewProgress]);
+
+  // Quick Preview camera lock and one-time fitBounds
+  const prevQuickPreviewActiveRef = useRef(false);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (isQuickPreviewActive) {
+      map.dragPan.disable();
+      map.scrollZoom.disable();
+      map.boxZoom.disable();
+      map.dragRotate.disable();
+      map.keyboard.disable();
+      map.doubleClickZoom.disable();
+      map.touchZoomRotate.disable();
+
+      if (!prevQuickPreviewActiveRef.current && routes[0]?.points?.length >= 2) {
+        const bounds = computeRouteBounds(routes[0].points);
+        if (bounds) {
+          map.fitBounds(
+            [
+              [bounds.minLng, bounds.minLat],
+              [bounds.maxLng, bounds.maxLat],
+            ],
+            { padding: 80, duration: 800 }
+          );
+        }
+      }
+    } else {
+      map.dragPan.enable();
+      map.scrollZoom.enable();
+      map.boxZoom.enable();
+      map.dragRotate.enable();
+      map.keyboard.enable();
+      map.doubleClickZoom.enable();
+      map.touchZoomRotate.enable();
+    }
+    prevQuickPreviewActiveRef.current = !!isQuickPreviewActive;
+  }, [isQuickPreviewActive, routes]);
 
   // Sync camera tilt (pitch) and bearing immediately when adjusted in the Camera step
   useEffect(() => {
@@ -782,8 +835,10 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         ? Math.min(1, Math.max(0, currentTime / duration))
         : 1;
 
-    // In route or signs step without playing, don't auto-pan camera so user can edit freely
-    if (!isPlaying && (currentStep === 'route' || currentStep === 'signs')) return;
+    if (isQuickPreviewActive) return;
+    // In route step, don't let video camera take over the user's view
+    if (currentStep === 'route') return;
+    if (!isPlaying && currentStep === 'signs') return;
 
     // Check if a timeline cameraBlock overrides the mode at this playhead ratio
     const sortedBlocks = cameraBlocks.slice().sort((a, b) => a.tRatio - b.tRatio);
@@ -801,20 +856,24 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
     if (effectiveMode === 'still') {
       if (cameraPreset === 'whole_tour' && pts.length > 0) {
-        const bounds = computeRouteBounds(pts);
-        if (bounds) {
-          map.fitBounds(
-            [
-              [bounds.minLng, bounds.minLat],
-              [bounds.maxLng, bounds.maxLat],
-            ],
-            {
-              padding: { top: 60, bottom: 60, left: 60, right: 60 },
-              pitch: effectivePitch !== undefined ? effectivePitch : 10,
-              bearing: 0,
-              animate: false,
-            }
-          );
+        const tourKey = `${pts.length}-${pts[0]?.lng.toFixed(4)}-${pts[pts.length - 1]?.lng.toFixed(4)}`;
+        if (lastWholeTourKeyRef.current !== tourKey) {
+          lastWholeTourKeyRef.current = tourKey;
+          const bounds = computeRouteBounds(pts);
+          if (bounds) {
+            map.fitBounds(
+              [
+                [bounds.minLng, bounds.minLat],
+                [bounds.maxLng, bounds.maxLat],
+              ],
+              {
+                padding: { top: 60, bottom: 60, left: 60, right: 60 },
+                pitch: effectivePitch !== undefined ? effectivePitch : 10,
+                bearing: 0,
+                duration: 800,
+              }
+            );
+          }
         }
         return;
       }
@@ -860,13 +919,22 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         }
       }
 
-      map.easeTo({
-        center: centerPos,
-        zoom: effectiveZoom,
-        pitch: effectivePitch,
-        bearing,
-        duration: isPlaying ? 100 : 0,
-      });
+      if (isPlaying) {
+        map.jumpTo({
+          center: centerPos,
+          zoom: effectiveZoom,
+          pitch: effectivePitch,
+          bearing,
+        });
+      } else {
+        map.easeTo({
+          center: centerPos,
+          zoom: effectiveZoom,
+          pitch: effectivePitch,
+          bearing,
+          duration: 100,
+        });
+      }
     } else if (effectiveMode === 'tripod') {
       // Tripod stands in one spot and turns to watch the vehicle go by
       const standOrigin: [number, number] = activeBlock
@@ -1052,18 +1120,91 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   const visibleResults = hasQuery ? searchResults : [];
   const visibleStatus = hasQuery ? searchStatus : 'idle';
 
-  const handleWorkspacePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+  const removeFallbackListeners = () => {
+    if (fallbackCleanupRef.current) {
+      fallbackCleanupRef.current();
+      fallbackCleanupRef.current = null;
+    }
+  };
+
+  const setupFallbackListeners = (targetPointerId: number) => {
+    removeFallbackListeners();
+
+    const handleWindowPointerMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== targetPointerId) return;
+      performPointerMoveRef.current?.(ev.pointerId, ev.clientX, ev.clientY);
+    };
+
+    const handleWindowPointerUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== targetPointerId) return;
+      performPointerUpRef.current?.(ev.pointerId);
+    };
+
+    const handleWindowPointerCancel = (ev: PointerEvent) => {
+      if (ev.pointerId !== targetPointerId) return;
+      performPointerCancelRef.current?.(ev.pointerId);
+    };
+
+    window.addEventListener('pointermove', handleWindowPointerMove, true);
+    window.addEventListener('pointerup', handleWindowPointerUp, true);
+    window.addEventListener('pointercancel', handleWindowPointerCancel, true);
+
+    fallbackCleanupRef.current = () => {
+      window.removeEventListener('pointermove', handleWindowPointerMove, true);
+      window.removeEventListener('pointerup', handleWindowPointerUp, true);
+      window.removeEventListener('pointercancel', handleWindowPointerCancel, true);
+    };
+  };
+
+  const startDragInteraction = (pointerId: number) => {
+    // Centrally protect active pointer: do not overwrite an existing active pointer
+    if (activePointerIdRef.current !== null) return;
+
+    activePointerIdRef.current = pointerId;
+    didDragRef.current = false;
+
+    let captured = false;
+    try {
+      if (workspaceRef.current) {
+        workspaceRef.current.setPointerCapture(pointerId);
+        captured = workspaceRef.current.hasPointerCapture(pointerId);
+      }
+    } catch {
+      captured = false;
+    }
+    hasPointerCaptureRef.current = captured;
+
+    if (!captured) {
+      setupFallbackListeners(pointerId);
+    } else {
+      removeFallbackListeners();
+    }
+
+    onStartInteraction?.();
+    map?.dragPan.disable();
+  };
+
+  const performPointerMove = (pointerId: number, clientX: number, clientY: number) => {
     if (!map || !workspaceRef.current) return;
-    if (!draggingPoint && !draggingSignId) return;
+    if (!draggingPoint && !draggingSignId && !draggingStopId && !draggingTitle) return;
+
+    // Verify pointer identity matches the active drag
+    if (activePointerIdRef.current === null || pointerId !== activePointerIdRef.current) {
+      return;
+    }
+
+    if (!didDragRef.current) {
+      didDragRef.current = true;
+      onMoveInteraction?.();
+    }
 
     const rect = workspaceRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
     const lngLat = map.unproject([x, y]);
-    didDragRef.current = true;
 
     if (draggingPoint) {
-      const route = routes.find((r) => r.id === draggingPoint.routeId);
+      const route = routesRef.current.find((r) => r.id === draggingPoint.routeId);
       if (!route) return;
       const updatedPts = [...route.points];
       updatedPts[draggingPoint.index] = {
@@ -1075,8 +1216,31 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         ...route,
         points: updatedPts,
       });
-    } else if (draggingSignId && signs) {
-      const sign = signs.find((s) => s.id === draggingSignId);
+    } else if (draggingStopId && canonicalRouteRef.current?.stops) {
+      const cr = canonicalRouteRef.current;
+      const updatedStops = cr.stops.map((s) => {
+        if (s.id === draggingStopId) {
+          return {
+            ...s,
+            lng: lngLat.lng,
+            lat: lngLat.lat,
+          };
+        }
+        return s;
+      });
+      onUpdateCanonicalRouteRef.current?.({
+        ...cr,
+        status: 'stale',
+        stops: updatedStops,
+      });
+    } else if (draggingTitle && overlaysRef.current) {
+      onUpdateOverlaysRef.current?.({
+        ...overlaysRef.current,
+        titleX: Math.round(x),
+        titleY: Math.round(y),
+      });
+    } else if (draggingSignId && signsRef.current) {
+      const sign = signsRef.current.find((s) => s.id === draggingSignId);
       if (!sign) return;
       onUpdateSignRef.current?.({
         ...sign,
@@ -1086,10 +1250,32 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     }
   };
 
-  const handleWorkspacePointerUp = () => {
+  const performPointerUp = (pointerId: number) => {
+    // Only process if this pointer matches the active drag
+    if (activePointerIdRef.current === null || pointerId !== activePointerIdRef.current) {
+      return;
+    }
+
+    removeFallbackListeners();
+
+    try {
+      if (workspaceRef.current?.hasPointerCapture(pointerId)) {
+        workspaceRef.current.releasePointerCapture(pointerId);
+      }
+    } catch {}
+
+    hasPointerCaptureRef.current = false;
+    activePointerIdRef.current = null;
+
+    const wasDragging =
+      draggingPoint !== null ||
+      draggingSignId !== null ||
+      draggingStopId !== null ||
+      draggingTitle;
+    const hadMoved = didDragRef.current;
     if (draggingPoint) {
-      const route = routes.find((r) => r.id === draggingPoint.routeId);
-      if (route) {
+      const route = routesRef.current.find((r) => r.id === draggingPoint.routeId);
+      if (route && hadMoved) {
         onUpdateRouteRef.current?.({
           ...route,
           stats: calculateTrackStats(route.points),
@@ -1098,10 +1284,76 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       setDraggingPoint(null);
       map?.dragPan.enable();
     }
+    if (draggingStopId) {
+      setDraggingStopId(null);
+      map?.dragPan.enable();
+    }
+    if (draggingTitle) {
+      setDraggingTitle(false);
+      map?.dragPan.enable();
+    }
     if (draggingSignId) {
       setDraggingSignId(null);
       map?.dragPan.enable();
     }
+    didDragRef.current = false;
+    if (wasDragging) {
+      onEndInteraction?.();
+    }
+  };
+
+  const performPointerCancel = (pointerId: number) => {
+    // Only process if this pointer matches the active drag
+    if (activePointerIdRef.current === null || pointerId !== activePointerIdRef.current) {
+      return;
+    }
+
+    removeFallbackListeners();
+
+    try {
+      if (workspaceRef.current?.hasPointerCapture(pointerId)) {
+        workspaceRef.current.releasePointerCapture(pointerId);
+      }
+    } catch {}
+
+    hasPointerCaptureRef.current = false;
+    activePointerIdRef.current = null;
+
+    const wasDragging = draggingPoint !== null || draggingSignId !== null;
+    if (draggingPoint) {
+      setDraggingPoint(null);
+      map?.dragPan.enable();
+    }
+    if (draggingSignId) {
+      setDraggingSignId(null);
+      map?.dragPan.enable();
+    }
+    didDragRef.current = false;
+    if (wasDragging) {
+      onCancelInteraction?.();
+    }
+  };
+
+  const performPointerMoveRef = useRef(performPointerMove);
+  performPointerMoveRef.current = performPointerMove;
+  const performPointerUpRef = useRef(performPointerUp);
+  performPointerUpRef.current = performPointerUp;
+  const performPointerCancelRef = useRef(performPointerCancel);
+  performPointerCancelRef.current = performPointerCancel;
+
+  const handleWorkspacePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!hasPointerCaptureRef.current) return;
+    performPointerMove(e.pointerId, e.clientX, e.clientY);
+  };
+
+  const handleWorkspacePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!hasPointerCaptureRef.current) return;
+    performPointerUp(e.pointerId);
+  };
+
+  const handleWorkspacePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!hasPointerCaptureRef.current) return;
+    performPointerCancel(e.pointerId);
   };
 
   // Click on route line to insert a point in between (Help Step 1)
@@ -1156,6 +1408,8 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       style={{ width: '100%', height: '100%' }}
       onPointerMove={handleWorkspacePointerMove}
       onPointerUp={handleWorkspacePointerUp}
+      onPointerCancel={handleWorkspacePointerCancel}
+      onLostPointerCapture={handleWorkspacePointerCancel}
     >
       <div ref={mapContainerRef} className="map" translate="no" />
 
@@ -1183,7 +1437,9 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                 ? Math.min(0.9, Math.max(0, route.startOffsetSec / duration))
                 : 0;
             const progress =
-              rawProgress <= offsetRatio
+              isQuickPreviewActive && quickPreviewProgress !== undefined
+                ? Math.min(1, Math.max(0, quickPreviewProgress))
+                : rawProgress <= offsetRatio
                 ? 0
                 : Math.min(1, (rawProgress - offsetRatio) / (1 - offsetRatio));
 
@@ -1205,7 +1461,10 @@ export const MapViewer: React.FC<MapViewerProps> = ({
               const p = map.project([pt.lng, pt.lat]);
               return [p.x, p.y] as [number, number];
             });
-            const strokeW = Math.max(3, (route.width || 8) * scale);
+            const strokeW = Math.max(
+              3,
+              ((route.width !== undefined && route.width <= 4) ? route.width : 3.5) * scale
+            );
             const dashArray =
               route.style === 'dashed'
                 ? `${strokeW * 1.8} ${strokeW * 1.9}`
@@ -1241,7 +1500,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                       d={d}
                       fill="none"
                       stroke="#ffffff"
-                      strokeWidth={strokeW + 4 * scale}
+                      strokeWidth={strokeW + 2 * scale}
                       strokeLinecap="round"
                       strokeLinejoin="round"
                       strokeDasharray={dashArray}
@@ -1335,9 +1594,11 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                         style: { pointerEvents: 'all' as const, cursor: 'grab' },
                         onPointerDown: (e: React.PointerEvent) => {
                           e.stopPropagation();
-                          didDragRef.current = false;
+                          if (activePointerIdRef.current !== null) {
+                            return;
+                          }
                           setDraggingSignId(sign.id);
-                          map.dragPan.disable();
+                          startDragInteraction(e.pointerId);
                         },
                       }
                     : {};
@@ -1469,9 +1730,37 @@ export const MapViewer: React.FC<MapViewerProps> = ({
             {aspect} · {resW}×{resH}
           </text>
 
-          {/* Overlays HUD: Trip Title & Subtitle */}
+          {/* Overlays HUD: Trip Title & Subtitle (Draggable Map Object) */}
           {overlays?.title && (
-            <g transform={`translate(${frame.x + 24}, ${frame.y + 36})`}>
+            <g
+              data-testid="draggable-title-hud"
+              transform={`translate(${overlays.titleX ?? frame.x + 24}, ${overlays.titleY ?? frame.y + 36})`}
+              style={{
+                pointerEvents: currentStep === 'overlays' || !isPlaying ? 'all' : 'none',
+                cursor: currentStep === 'overlays' || !isPlaying ? 'grab' : 'default',
+              }}
+              onPointerDown={(e) => {
+                if (currentStep !== 'overlays' && isPlaying) return;
+                e.stopPropagation();
+                if (activePointerIdRef.current !== null) return;
+                setDraggingTitle(true);
+                startDragInteraction(e.pointerId);
+              }}
+            >
+              {/* Subtle dashed selection boundary when editing overlays */}
+              {currentStep === 'overlays' && (
+                <rect
+                  x="-8"
+                  y="-26"
+                  width={Math.max(120, overlays.title.length * 15 * scale + 24)}
+                  height={overlays.subtitle ? 56 * scale : 36 * scale}
+                  rx="6"
+                  fill="rgba(20, 184, 166, 0.08)"
+                  stroke="rgba(20, 184, 166, 0.45)"
+                  strokeWidth="1.2"
+                  strokeDasharray="4 3"
+                />
+              )}
               <text
                 fill="#ffffff"
                 fontSize={Math.max(16, 22 * scale)}
@@ -1686,99 +1975,182 @@ export const MapViewer: React.FC<MapViewerProps> = ({
             </text>
           )}
 
-          {/* Route Anchor Handles & ⏸ Pause Badges in Route step */}
-          {currentStep === 'route' &&
-            map &&
-            routes.flatMap((route) =>
-              route.points.map((pt, idx) => {
-                const p = map.project([pt.lng, pt.lat]);
-                const isPaused = pt.pauseSec && pt.pauseSec > 0;
+          {/* Route Handles & Canonical Journey Stop Markers in Route Step */}
+          {!isQuickPreviewActive && currentStep === 'route' && map && (() => {
+            const validCanonicalStops = (canonicalRoute?.stops || []).filter(
+              (s) => !isNaN(s.lng) && !isNaN(s.lat) && (s.lng !== 0 || s.lat !== 0)
+            );
+
+            // If canonical journey stops exist, render clean interactive stop pins (B02, B06, B09)
+            if (validCanonicalStops.length > 0) {
+              return validCanonicalStops.map((stop, idx) => {
+                const p = map.project([stop.lng, stop.lat]);
+                const isStart = idx === 0;
+                const isDest = idx === validCanonicalStops.length - 1;
+                const pinColor = isStart ? '#10b981' : isDest ? '#f97316' : '#0284c7';
+                const stopLabel = stop.customLabel || stop.placeName || (isStart ? 'Start' : isDest ? 'Destination' : `Stop ${idx + 1}`);
+
                 return (
                   <g
-                    key={`${route.id}-pt-${idx}`}
+                    key={stop.id}
+                    data-testid={`canonical-stop-${stop.id}`}
+                    transform={`translate(${p.x}, ${p.y})`}
                     style={{ pointerEvents: 'all', cursor: 'grab' }}
                     onPointerDown={(e) => {
                       e.stopPropagation();
-                      didDragRef.current = false;
-                      setDraggingPoint({ routeId: route.id, index: idx });
-                      map.dragPan.disable();
+                      if (activePointerIdRef.current !== null) return;
+                      setDraggingStopId(stop.id);
+                      startDragInteraction(e.pointerId);
                     }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handlePointClick(route.id, idx);
-                    }}
-                    onDoubleClick={(e) => {
-                      e.stopPropagation();
-                      handlePointDoubleClick(route.id, idx);
-                    }}
-                    className="cursor-pointer"
                   >
-                    <circle cx={p.x} cy={p.y} r={pt.sharpCorner ? 5.5 : 6.5} className="anchor" />
-                    {/* ⏸ Mark on paused point (Official Help Guide feature) */}
-                    {isPaused && (
-                      <g transform={`translate(${p.x + 9}, ${p.y - 9})`}>
-                        <rect x="-7" y="-7" width="14" height="14" rx="3" fill="#ff4d2e" stroke="#ffffff" strokeWidth="1" />
-                        <rect x="-4" y="-4" width="2.5" height="8" rx="0.5" fill="#ffffff" />
-                        <rect x="1.5" y="-4" width="2.5" height="8" rx="0.5" fill="#ffffff" />
+                    {/* Ground drop shadow */}
+                    <ellipse cx={0} cy={0} rx={10 * scale} ry={4 * scale} fill="rgba(0,0,0,0.35)" />
+                    {/* Pin shape */}
+                    <path
+                      d="M0 0 C -3 -8, -14 -16, -14 -26 C -14 -35, -8 -41, 0 -41 C 8 -41, 14 -35, 14 -26 C 14 -16, 3 -8, 0 0 Z"
+                      fill={pinColor}
+                      stroke="#ffffff"
+                      strokeWidth="2"
+                    />
+                    <circle cx={0} cy={-26 * scale} r={4.5 * scale} fill="#ffffff" />
+                    {/* Stop name pill badge */}
+                    {stopLabel && (
+                      <g transform={`translate(0, ${-48 * scale})`}>
+                        <rect
+                          x={-((stopLabel.length * 6.5 + 16) / 2)}
+                          y={-11}
+                          width={stopLabel.length * 6.5 + 16}
+                          height={20}
+                          rx={10}
+                          fill="#0f172ae6"
+                          stroke={pinColor}
+                          strokeWidth="1.2"
+                        />
+                        <text
+                          x={0}
+                          y={3}
+                          textAnchor="middle"
+                          fill="#ffffff"
+                          fontSize={10.5}
+                          fontWeight="700"
+                          fontFamily="sans-serif"
+                        >
+                          {stopLabel}
+                        </text>
                       </g>
                     )}
                   </g>
                 );
-              })
-            )}
+              });
+            }
 
-          {/* Destination Pin Marker on Map when entered */}
-          {destinationPreview && map && (() => {
-            const pos = map.project([destinationPreview.lng, destinationPreview.lat]);
-            return (
-              <g
-                key="destination-preview-pin"
-                transform={`translate(${pos.x}, ${pos.y})`}
-                className="pointer-events-none select-none transition-all duration-300"
-              >
-                {/* Ground shadow */}
-                <ellipse cx={0} cy={0} rx={12 * scale} ry={5 * scale} fill="rgba(0,0,0,0.4)" />
-                {/* Pulsing beacon ring */}
-                <circle cx={0} cy={-28 * scale} r={22 * scale} fill="none" stroke="#f97316" strokeWidth="2.5" opacity="0.6">
-                  <animate attributeName="r" values={`${18 * scale};${32 * scale};${18 * scale}`} dur="2s" repeatCount="indefinite" />
-                  <animate attributeName="opacity" values="0.8;0.1;0.8" dur="2s" repeatCount="indefinite" />
-                </circle>
-                {/* Vibrant Pin Body */}
-                <path
-                  d={`M0 0 C -4 -10, -18 -22, -18 -36 C -18 -48, -10 -56, 0 -56 C 10 -56, 18 -48, 18 -36 C 18 -22, 4 -10, 0 0 Z`}
-                  fill="#f97316"
-                  stroke="#ffffff"
-                  strokeWidth="2.5"
-                />
-                <circle cx={0} cy={-36 * scale} r={6 * scale} fill="#ffffff" />
-                {/* Destination label badge */}
-                <g transform={`translate(0, ${-64 * scale})`}>
-                  <rect
-                    x={-((destinationPreview.name.length * 7.5 + 24) / 2)}
-                    y={-14}
-                    width={destinationPreview.name.length * 7.5 + 24}
-                    height={24}
-                    rx={12}
-                    fill="#0f172ae6"
-                    stroke="#f97316"
-                    strokeWidth="1.5"
-                  />
-                  <text
-                    x={0}
-                    y={3}
-                    textAnchor="middle"
-                    fill="#ffffff"
-                    fontSize={11.5}
-                    fontWeight="700"
-                    fontFamily="sans-serif"
-                  >
-                    🎯 {destinationPreview.name}
-                  </text>
-                </g>
-              </g>
+            // Fallback for manual or GPX imported routes without canonical stops:
+            // Render only start, end, and explicit pauses/sharp corners (never hundreds of internal points) (B06)
+            return routes.flatMap((route) =>
+              route.points
+                .map((pt, idx) => ({ pt, idx }))
+                .filter(
+                  ({ pt, idx }) =>
+                    idx === 0 ||
+                    idx === route.points.length - 1 ||
+                    (pt.pauseSec && pt.pauseSec > 0) ||
+                    pt.sharpCorner
+                )
+                .map(({ pt, idx }) => {
+                  const p = map.project([pt.lng, pt.lat]);
+                  const isPaused = pt.pauseSec && pt.pauseSec > 0;
+                  return (
+                    <g
+                      key={`${route.id}-pt-${idx}`}
+                      style={{ pointerEvents: 'all', cursor: 'grab' }}
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        if (activePointerIdRef.current !== null) return;
+                        setDraggingPoint({ routeId: route.id, index: idx });
+                        startDragInteraction(e.pointerId);
+                      }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlePointClick(route.id, idx);
+                      }}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        handlePointDoubleClick(route.id, idx);
+                      }}
+                      className="cursor-pointer"
+                    >
+                      <circle cx={p.x} cy={p.y} r={pt.sharpCorner ? 5.5 : 6.5} className="anchor" />
+                      {isPaused && (
+                        <g transform={`translate(${p.x + 9}, ${p.y - 9})`}>
+                          <rect x="-7" y="-7" width="14" height="14" rx="3" fill="#ff4d2e" stroke="#ffffff" strokeWidth="1" />
+                          <rect x="-4" y="-4" width="2.5" height="8" rx="0.5" fill="#ffffff" />
+                          <rect x="1.5" y="-4" width="2.5" height="8" rx="0.5" fill="#ffffff" />
+                        </g>
+                      )}
+                    </g>
+                  );
+                })
             );
           })()}
+
+          {/* Destination Pin Marker on Map when entered prior to route generation */}
+          {!isQuickPreviewActive &&
+            destinationPreview &&
+            !(canonicalRoute?.stops && canonicalRoute.stops.some((s) => !isNaN(s.lng) && Math.abs(s.lng - destinationPreview.lng) < 1e-4)) &&
+            map && (() => {
+              const pos = map.project([destinationPreview.lng, destinationPreview.lat]);
+              return (
+                <g
+                  key="destination-preview-pin"
+                  transform={`translate(${pos.x}, ${pos.y})`}
+                  className="pointer-events-none select-none transition-all duration-300"
+                >
+                  <ellipse cx={0} cy={0} rx={12 * scale} ry={5 * scale} fill="rgba(0,0,0,0.4)" />
+                  <path
+                    d={`M0 0 C -4 -10, -18 -22, -18 -36 C -18 -48, -10 -56, 0 -56 C 10 -56, 18 -48, 18 -36 C 18 -22, 4 -10, 0 0 Z`}
+                    fill="#f97316"
+                    stroke="#ffffff"
+                    strokeWidth="2"
+                  />
+                  <circle cx={0} cy={-36 * scale} r={6 * scale} fill="#ffffff" />
+                  <g transform={`translate(0, ${-64 * scale})`}>
+                    <rect
+                      x={-((destinationPreview.name.length * 7.5 + 24) / 2)}
+                      y={-14}
+                      width={destinationPreview.name.length * 7.5 + 24}
+                      height={24}
+                      rx={12}
+                      fill="#0f172ae6"
+                      stroke="#f97316"
+                      strokeWidth="1.5"
+                    />
+                    <text
+                      x={0}
+                      y={3}
+                      textAnchor="middle"
+                      fill="#ffffff"
+                      fontSize={11.5}
+                      fontWeight="700"
+                      fontFamily="sans-serif"
+                    >
+                      🎯 {destinationPreview.name}
+                    </text>
+                  </g>
+                </g>
+              );
+            })()}
         </svg>
+      )}
+
+      {/* Quick Preview Remaining-Distance HUD */}
+      {isQuickPreviewActive && quickPreviewRemainingDistance && (
+        <div
+          data-testid="quick-preview-hud"
+          className="absolute top-4 left-4 z-20 pointer-events-none flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900/90 text-white shadow-xl border border-teal-500/40 backdrop-blur-md text-xs font-semibold tracking-wide"
+        >
+          <span className="w-2.5 h-2.5 rounded-full bg-teal-400 animate-pulse" />
+          <span>Remaining: {quickPreviewRemainingDistance}</span>
+        </div>
       )}
 
       {/* Photon Place Search (`Q3` exact structure) */}
@@ -1919,6 +2291,20 @@ export const MapViewer: React.FC<MapViewerProps> = ({
           )}
         </div>
       )}
+
+      {/* Touch-friendly Waypoint Options Modal (replaces blocking window.prompt) */}
+      {editingWaypoint && (() => {
+        const activeR = routes.find((r) => r.id === editingWaypoint.routeId);
+        if (!activeR) return null;
+        return (
+          <WaypointOptionsModal
+            route={activeR}
+            pointIndex={editingWaypoint.index}
+            onUpdateRoute={(updated) => onUpdateRouteRef.current?.(updated)}
+            onClose={() => setEditingWaypoint(null)}
+          />
+        );
+      })()}
     </div>
   );
 };

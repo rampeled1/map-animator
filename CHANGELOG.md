@@ -2,6 +2,35 @@
 
 All notable changes to the Map Animator project are documented in this file.
 
+## [1.1.0] - 2026-11-09 (v4.0.0 Phase 2 — Responsive Interface Prototype)
+
+### Added & Changed
+- **Three Adaptive Responsive Experiences (`useResponsiveLayout.ts`)**:
+  - **Desktop (`>= 1280px`)**: Preserves the complete 8-step workflow (`Route`, `Camera`, `Map`, `Line`, `Title`, `Photos`, `Info`, `Video`), Simple/Advanced modes, fixed `340px` sidebar, camera timeline editor, and export functionality.
+  - **Tablet (`768px – 1279px`)**: Introduces [`TabletDrawerContainer.tsx`](file:///Users/rampeled/developer/map-animator/src/components/TabletDrawerContainer.tsx) with a slide-over overlay drawer + backdrop in Tablet Portrait (`768px–1023px`) and a collapsible docked drawer in Tablet Landscape (`1024px–1279px`).
+  - **iPhone (`< 768px`, down to `320px`)**: Implements the **4-Stage Mobile Workflow** (`1. Create Journey`, `2. Choose Style`, `3. Personalize`, `4. Create Video`) as a presentation layer over the 8 steps via [`MobileStageNav.tsx`](file:///Users/rampeled/developer/map-animator/src/components/MobileStageNav.tsx), complete with `Map` / `Split` / `Full` bottom-sheet snap modes and segmented sub-step switchers (`Camera | Map | Line` and `Title | Photos | Info`).
+- **Touch-Friendly Modal & Inline Controls**:
+  - Replaced blocking `window.prompt()` waypoint options dialog in [`MapViewer.tsx`](file:///Users/rampeled/developer/map-animator/src/components/MapViewer.tsx) with [`WaypointOptionsModal.tsx`](file:///Users/rampeled/developer/map-animator/src/components/WaypointOptionsModal.tsx) (pause duration presets/slider, sharp corner toggle, leg transport selector, delete waypoint).
+  - Replaced blocking `window.prompt()` route rename in [`RouteEditorPanel.tsx`](file:///Users/rampeled/developer/map-animator/src/components/RouteEditorPanel.tsx) with an inline rename input + Save/Cancel buttons.
+- **Persistent WebGL Context & Automatic Canvas Resize**:
+  - Kept `<main key="stage-slot"><MapViewer /></main>` mounted in a constant DOM slot across all responsive breakpoints so resizing or rotating never destroys the MapLibre + Three.js WebGL context.
+  - Added `requestAnimationFrame(() => mapRef.current?.resize())` inside `MapViewer`'s `ResizeObserver` so drawer collapses and bottom-sheet snaps smoothly resize the WebGL canvas.
+- **Automated Responsive Verification (`verify_features.ts`)**:
+  - Expanded automated test suite to `83 / 83` assertions covering all 9 viewport breakpoints (`320px` through `1440px`) and 4-stage workflow mappings.
+
+## [1.0.0] - 2026-11-09
+
+### Added & Changed (Major UI & Design System Overhaul)
+- **Unified Sidebar Panel Architecture**:
+  - Standardized sidebar width to `340px` (`w-85` defined in `tailwind.config.js` and `.panel` rule in `index.css`) across **all steps** (Route, Camera, Map, Line, Title, Photos, Info, Video).
+  - Replaced the split 60/40 screen layout in the **Camera** step with the standardized sidebar panel, ensuring the 3D map canvas stays seamlessly anchored on the right.
+- **Redesigned Map Step Experience (`STEP 3 · MAP`)**:
+  - Replaced wide 4-column overflow layout with a 2-column card grid (`grid-cols-2 gap-2`) with theme swatches, teal selection rings, and unified card geometry.
+  - Upgraded **Map Details** checkboxes to interactive toggle cards with status descriptions and teal checkmark indicators (`✓`), matching the Info step design system.
+- **Visual Design & Typography Consistency**:
+  - Aligned all step headers to standard `STEP X · LABEL` subheaders with bold uppercase tracking, `h2` page titles, and subtitle descriptions.
+  - Unified theme swatches and buttons with dark slate backgrounds (`#1e293b`), borders (`#334155`), and teal active highlights (`#14b8a6`).
+
 ## [0.4.0] - 2026-11-07
 
 ### Added

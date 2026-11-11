@@ -47,7 +47,8 @@ export function densifyRoadCoordinates(
     return roadCoords.map((c) => ({ lng: c.lng, lat: c.lat }));
   }
 
-  const result: RoutePoint[] = [];
+  // Prepend the initial road coordinate so the start of the road is never dropped
+  const result: RoutePoint[] = [{ lng: roadCoords[0].lng, lat: roadCoords[0].lat }];
 
   for (let i = 0; i < roadCoords.length - 1; i++) {
     const p1 = roadCoords[i];
@@ -127,7 +128,8 @@ export async function getRoadRoute(
   start: { lng: number; lat: number },
   end: { lng: number; lat: number },
   profile: SnapProfile = 'driving',
-  intervalKm: number | 'auto' = 0.1
+  intervalKm: number | 'auto' = 0.1,
+  allowDirectFallback: boolean = false
 ): Promise<RoutePoint[]> {
   const maxStepM = typeof intervalKm === 'number' ? intervalKm * 1000 : 100;
 
@@ -165,8 +167,11 @@ export async function getRoadRoute(
     }
   }
 
-  // Fallback: accurately densify direct connection with points every 0.1 km (100m)
-  return densifyRoadCoordinates([start, end], maxStepM);
+  if (allowDirectFallback) {
+    return densifyRoadCoordinates([start, end], maxStepM);
+  }
+
+  throw new Error(`Routing calculation failed for profile "${profile}": OSRM service returned no route or was unreachable.`);
 }
 
 export interface PlaceSuggestion {
@@ -201,6 +206,18 @@ const BUILTIN_PLACES: PlaceSuggestion[] = [
   { id: 'tokyo', name: 'Tokyo', context: 'Japan', fullName: 'Tokyo, Japan', lng: 139.6917, lat: 35.6895 },
   { id: 'hnd', name: 'Tokyo Haneda Airport (HND)', context: 'Tokyo, Japan', fullName: 'Tokyo Haneda Airport (HND), Tokyo, Japan', lng: 139.7798, lat: 35.5494 },
 ];
+
+function formatPlaceTitle(str: string): string {
+  if (!str) return '';
+  return str
+    .split(/(\s+|,|-)/)
+    .map((word) => {
+      if (/^[A-Z0-9]{2,4}$/.test(word)) return word; // preserve acronyms like GYD, JFK, TLV, UK
+      if (word.length <= 1) return word.toUpperCase();
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    })
+    .join('');
+}
 
 /**
  * Searches place names with autocomplete via multi-provider fallback:
@@ -251,14 +268,16 @@ export async function searchPlaceSuggestions(
           if (isNaN(lat) || isNaN(lng)) continue;
 
           const addr = item.address || {};
-          const mainName = item.name || item.display_name.split(',')[0].trim();
+          const rawMainName = item.name || item.display_name.split(',')[0].trim();
+          const mainName = formatPlaceTitle(rawMainName);
           const contextParts = [
             addr.city || addr.town || addr.village || addr.municipality || addr.county,
             addr.state,
             addr.country,
-          ].filter((v, i, a) => v && v !== mainName && a.indexOf(v) === i);
+          ].filter((v, i, a) => v && v !== rawMainName && a.indexOf(v) === i)
+           .map((c) => formatPlaceTitle(c));
           const context = contextParts.join(', ');
-          const fullName = context ? `${mainName}, ${context}` : item.display_name;
+          const fullName = context ? `${mainName}, ${context}` : mainName;
 
           if (seen.has(fullName.toLowerCase()) || seen.has(mainName.toLowerCase())) continue;
           seen.add(fullName.toLowerCase());
@@ -294,11 +313,13 @@ export async function searchPlaceSuggestions(
 
       for (const feat of data.features ?? []) {
         const p = feat.properties ?? {};
-        const name = p.name || p.city || p.street;
+        const rawName = p.name || p.city || p.street;
         const coords = feat.geometry?.coordinates;
-        if (!name || !Array.isArray(coords) || coords.length < 2) continue;
+        if (!rawName || !Array.isArray(coords) || coords.length < 2) continue;
+        const name = formatPlaceTitle(rawName);
         const context = [p.city, p.state, p.country]
-          .filter((v, i, arr) => v && v !== name && arr.indexOf(v) === i)
+          .filter((v, i, arr) => v && v !== rawName && arr.indexOf(v) === i)
+          .map((c) => formatPlaceTitle(c))
           .join(', ');
         const fullName = context ? `${name}, ${context}` : name;
         if (seen.has(fullName.toLowerCase())) continue;
@@ -321,56 +342,102 @@ export async function searchPlaceSuggestions(
   return localMatches;
 }
 
+function appendPointDeduplicated(target: RoutePoint[], pt: RoutePoint) {
+  if (target.length === 0) {
+    target.push(pt);
+    return;
+  }
+  const last = target[target.length - 1];
+  // Skip duplicate consecutive coordinate (within 1e-7 degrees, ~1.1cm) at segment boundaries
+  if (Math.abs(last.lng - pt.lng) < 1e-7 && Math.abs(last.lat - pt.lat) < 1e-7) {
+    return;
+  }
+  target.push(pt);
+}
+
 /**
  * Builds a complete multi-stop route automatically based on selected transport mode.
- * Automatically picks road routing for Car/Walk/Bike or smooth curved flight arc for Plane.
+ * Follow Roads (OSRM) applies exclusively to: 'car', 'walking', 'bike'.
+ * Free Mode (Direct / Arc Geometry) applies to: 'train', 'boat', 'plane'.
  */
 export async function buildJourneyFromStops(
   stops: { lng: number; lat: number }[],
-  transportMode: string = 'car'
+  transportMode: string | string[] = 'car'
 ): Promise<RoutePoint[]> {
   if (stops.length === 0) return [];
   if (stops.length === 1) return [{ lng: stops[0].lng, lat: stops[0].lat }];
 
-  const isAirOrSea = ['plane', 'sportsplane', 'floatplane', 'fighter', 'bomber', 'helicopter', 'drone', 'balloon', 'boat', 'sailboat', 'cruiseship', 'ferry'].includes(transportMode);
-
-  let profile: SnapProfile = 'driving';
-  if (['walking', 'running', 'hiker', 'winterhike'].includes(transportMode)) {
-    profile = 'walking';
-  } else if (['bicycle', 'mountainbike'].includes(transportMode)) {
-    profile = 'cycling';
-  } else if (isAirOrSea) {
-    profile = 'off';
-  }
-
-  const allPoints: RoutePoint[] = [{ lng: stops[0].lng, lat: stops[0].lat }];
+  const allPoints: RoutePoint[] = [];
+  appendPointDeduplicated(allPoints, { lng: stops[0].lng, lat: stops[0].lat });
 
   for (let i = 0; i < stops.length - 1; i++) {
     const start = stops[i];
     const end = stops[i + 1];
+    const mode = (Array.isArray(transportMode) ? transportMode[i] || transportMode[0] : transportMode) || 'car';
 
-    if (isAirOrSea) {
-      // Create a smooth flight/maritime arc with 80 points
+    const isPlane = ['plane', 'sportsplane', 'floatplane', 'fighter', 'bomber', 'helicopter', 'drone', 'balloon', 'sailplane', 'paramotor', 'hangglider', 'paraglider'].includes(mode);
+    const isBoat = ['boat', 'sailboat', 'cruiseship', 'ferry', 'tallship', 'trimaran', 'kayak', 'raft', 'surf'].includes(mode);
+    const isTrain = ['train', 'steam_train', 'funicular'].includes(mode);
+
+    let legPoints: RoutePoint[] = [];
+
+    if (isPlane) {
+      // Free Mode (Flight Arc): 3D parabolic curve with altitude apex
       const steps = 80;
       const dLng = end.lng - start.lng;
       const dLat = end.lat - start.lat;
-      // Subtle perpendicular arc offset for visual appeal on flights
       const perpLng = -dLat * 0.12;
       const perpLat = dLng * 0.12;
       for (let s = 1; s <= steps; s++) {
         const t = s / steps;
         const arc = Math.sin(t * Math.PI);
-        allPoints.push({
+        legPoints.push({
           lng: start.lng + dLng * t + perpLng * arc,
           lat: start.lat + dLat * t + perpLat * arc,
           ele: Math.round(arc * 8500),
         });
       }
+    } else if (isBoat) {
+      // Free Mode (Maritime Arc): smooth curvature across water with zero elevation
+      const steps = 60;
+      const dLng = end.lng - start.lng;
+      const dLat = end.lat - start.lat;
+      const perpLng = -dLat * 0.05;
+      const perpLat = dLng * 0.05;
+      for (let s = 1; s <= steps; s++) {
+        const t = s / steps;
+        const arc = Math.sin(t * Math.PI);
+        legPoints.push({
+          lng: start.lng + dLng * t + perpLng * arc,
+          lat: start.lat + dLat * t + perpLat * arc,
+          ele: 0,
+        });
+      }
+    } else if (isTrain) {
+      // Free Mode (Train / Rail): direct linear geodesic track with 0.1 km densification (no road/highway snapping)
+      legPoints = densifyRoadCoordinates([start, end], 100);
     } else {
-      const legPoints = await getRoadRoute(start, end, profile, 0.1);
-      allPoints.push(...legPoints);
+      // Follow Roads (OSRM Engine): car, walking, bike
+      let profile: SnapProfile = 'driving';
+      if (['walking', 'running', 'hiker', 'winterhike', 'swimming'].includes(mode)) {
+        profile = 'walking';
+      } else if (['bike', 'bicycle', 'mountainbike'].includes(mode)) {
+        profile = 'cycling';
+      } else {
+        profile = 'driving';
+      }
+
+      legPoints = await getRoadRoute(start, end, profile, 0.1, false);
+    }
+
+    for (const pt of legPoints) {
+      appendPointDeduplicated(allPoints, pt);
     }
   }
+
+  // Ensure destination coordinate is always preserved exactly at the end
+  const destStop = stops[stops.length - 1];
+  appendPointDeduplicated(allPoints, { lng: destStop.lng, lat: destStop.lat });
 
   return allPoints;
 }

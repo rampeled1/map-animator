@@ -5,6 +5,12 @@ import { resampleRouteByDistance, searchPlaceSuggestions, buildJourneyFromStops 
 import type { RoutePoint } from './src/types/index.ts';
 import { mapPresetToCameraBlocks, computeRouteBounds } from './src/utils/cameraPresetMapper.ts';
 import { migrateProjectDefaults } from './src/utils/projectStorage.ts';
+import {
+  classifyViewport,
+  getStageForStep,
+  getDefaultStepForStage,
+  MOBILE_STAGES,
+} from './src/utils/useResponsiveLayout.ts';
 
 console.log('=== MAP ANIMATOR COMPREHENSIVE VERIFICATION ===\n');
 
@@ -177,6 +183,25 @@ console.log('\n9. Checking UX Simplification v3.0 (Simple Journey Builder & Auto
   );
   assert(planePts.length >= 40, `Plane journey generates smooth flight arc (${planePts.length} points)`);
   assert((planePts[Math.floor(planePts.length / 2)].ele ?? 0) > 100, 'Plane journey arc includes cruise altitude apex');
+
+  // 10. Verify Phase 2 Responsive Breakpoint Classification & 4-Stage Workflow Mapping
+  console.log('\n10. Checking Phase 2 Responsive Breakpoints & 4-Stage Mobile Workflow:');
+  assert(classifyViewport(320, 568).experience === 'mobile' && classifyViewport(320, 568).tier === 'small-mobile', '320px classifies as small-mobile / mobile experience');
+  assert(classifyViewport(375, 667).experience === 'mobile' && classifyViewport(375, 667).tier === 'small-mobile', '375px classifies as small-mobile / mobile experience');
+  assert(classifyViewport(390, 844).experience === 'mobile' && classifyViewport(390, 844).tier === 'small-mobile', '390px classifies as small-mobile / mobile experience');
+  assert(classifyViewport(430, 932).experience === 'mobile' && classifyViewport(430, 932).tier === 'large-mobile', '430px classifies as large-mobile / mobile experience');
+  assert(classifyViewport(768, 1024).experience === 'tablet' && classifyViewport(768, 1024).tier === 'tablet-portrait', '768px classifies as tablet-portrait / tablet experience');
+  assert(classifyViewport(820, 1180).experience === 'tablet' && classifyViewport(820, 1180).tier === 'tablet-portrait', '820px classifies as tablet-portrait / tablet experience');
+  assert(classifyViewport(1024, 768).experience === 'tablet' && classifyViewport(1024, 768).tier === 'tablet-landscape', '1024px classifies as tablet-landscape / tablet experience');
+  assert(classifyViewport(1280, 800).experience === 'desktop' && classifyViewport(1280, 800).tier === 'desktop', '1280px classifies as desktop experience');
+  assert(classifyViewport(1440, 900).experience === 'desktop' && classifyViewport(1440, 900).tier === 'desktop', '1440px classifies as desktop experience');
+
+  assert(MOBILE_STAGES.length === 4, 'Mobile interface defines 4 stages');
+  assert(getStageForStep('route') === 'journey', 'Step route maps to Stage 1 (journey)');
+  assert(getStageForStep('camera') === 'style' && getStageForStep('map') === 'style' && getStageForStep('line') === 'style', 'Steps camera, map, line map to Stage 2 (style)');
+  assert(getStageForStep('title') === 'personalize' && getStageForStep('signs') === 'personalize' && getStageForStep('overlays') === 'personalize', 'Steps title, signs, overlays map to Stage 3 (personalize)');
+  assert(getStageForStep('preview') === 'video', 'Step preview maps to Stage 4 (video)');
+  assert(getDefaultStepForStage('style') === 'camera' && getDefaultStepForStage('personalize') === 'title', 'Default sub-steps resolve accurately for grouped stages');
 
   console.log(`\n========================================`);
   console.log(`RESULTS: ${passedTests} / ${totalTests} tests passed successfully.`);
