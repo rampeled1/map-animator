@@ -149,9 +149,24 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
     this.loadVehicleModel();
   }
 
+  private continuousRepaintActive: boolean = false;
+
+  public setContinuousRepaint(active: boolean) {
+    if (this.continuousRepaintActive !== active) {
+      this.continuousRepaintActive = active;
+      if (active) {
+        this.map?.triggerRepaint();
+      }
+    }
+  }
+
   public setProgress(distanceProgress: number) {
-    this.currentProgress = Math.max(0, Math.min(1, distanceProgress));
-    this.currentSplineU = this.pathEngine.getSplineParameterAtDistanceProgress(this.currentProgress);
+    const clamped = Math.max(0, Math.min(1, distanceProgress));
+    if (this.currentProgress !== clamped) {
+      this.currentProgress = clamped;
+      this.currentSplineU = this.pathEngine.getSplineParameterAtDistanceProgress(this.currentProgress);
+      this.map?.triggerRepaint();
+    }
   }
 
   /**
@@ -235,7 +250,9 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
 
     this.renderer.resetState();
     this.renderer.render(this.scene, this.camera);
-    this.map.triggerRepaint();
+    if (this.continuousRepaintActive) {
+      this.map.triggerRepaint();
+    }
   }
 
   private updateRibbonGeometry(mesh: THREE.Mesh, positions: Float32Array, count: number) {

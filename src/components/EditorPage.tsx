@@ -22,7 +22,7 @@ import {
 import { CatmullRom3DPath } from '../utils/catmullRom3DPath';
 import { getAdaptedCanonicalRoute } from '../utils/routeAdapter';
 import { projectStorage } from '../utils/indexedDbStorage';
-import { MapViewer } from './MapViewer';
+import { MapViewer, MapViewerHandle } from './MapViewer';
 import { RouteEditorPanel } from './RouteEditorPanel';
 import { SignsEditorPanel } from './SignsEditorPanel';
 import { OverlaysEditorPanel } from './OverlaysEditorPanel';
@@ -111,6 +111,14 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   const [currentStep, setCurrentStep] = useState<StepId>('route');
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  const mapViewerRef = useRef<MapViewerHandle | null>(null);
+  const currentTimeRef = useRef<number>(0);
+  const lastTimelineUIUpdateRef = useRef<number>(0);
+  const lastQuickPreviewUIUpdateRef = useRef<number>(0);
+
+  if (!isPlaying) {
+    currentTimeRef.current = currentTime;
+  }
   const [playbackSpeed, setPlaybackSpeed] = useState<0.5 | 1 | 2>(1);
   const [moreThemesOpen, setMoreThemesOpen] = useState(false);
   const [snapProfile, setSnapProfile] = useState<SnapProfile>('driving');
@@ -292,7 +300,9 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   const previewRafRef = useRef<number | null>(null);
   const previewLastTimeRef = useRef<number>(0);
   const previewProgressRef = useRef<number>(0);
-  previewProgressRef.current = quickPreviewProgress;
+  if (quickPreviewState !== 'playing') {
+    previewProgressRef.current = quickPreviewProgress;
+  }
 
   // Single consistent distance-normalized progress model derived from CatmullRom3DPath
   const previewPathEngine = useMemo(() => {
@@ -312,6 +322,15 @@ export const EditorPage: React.FC<EditorPageProps> = ({
     }
     setQuickPreviewState('idle');
     setQuickPreviewProgress(0);
+    previewProgressRef.current = 0;
+    mapViewerRef.current?.updatePlaybackFrame({
+      progress: 0,
+      dtSec: 0,
+      rafTime: performance.now(),
+      isPlaying: false,
+      isQuickPreview: false,
+      isSeek: true,
+    });
   };
 
   const stopQuickPreview = () => {
@@ -324,6 +343,14 @@ export const EditorPage: React.FC<EditorPageProps> = ({
       previewRafRef.current = null;
     }
     setQuickPreviewState('paused');
+    mapViewerRef.current?.updatePlaybackFrame({
+      progress: previewProgressRef.current,
+      dtSec: 0,
+      rafTime: performance.now(),
+      isPlaying: false,
+      isQuickPreview: true,
+      isSeek: true,
+    });
   };
 
   const resumeQuickPreview = () => {
@@ -334,6 +361,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
       return;
     }
     previewLastTimeRef.current = performance.now();
+    lastQuickPreviewUIUpdateRef.current = performance.now();
     setQuickPreviewState('playing');
   };
 
@@ -347,6 +375,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
     setQuickPreviewProgress(0);
     previewProgressRef.current = 0;
     previewLastTimeRef.current = performance.now();
+    lastQuickPreviewUIUpdateRef.current = performance.now();
     setQuickPreviewState('playing');
   };
 
@@ -358,6 +387,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
       return;
     }
     previewLastTimeRef.current = performance.now();
+    lastQuickPreviewUIUpdateRef.current = performance.now();
     setQuickPreviewState('playing');
   };
 
@@ -365,6 +395,14 @@ export const EditorPage: React.FC<EditorPageProps> = ({
     const clamped = Math.max(0, Math.min(1, p));
     previewProgressRef.current = clamped;
     setQuickPreviewProgress(clamped);
+    mapViewerRef.current?.updatePlaybackFrame({
+      progress: clamped,
+      dtSec: 0,
+      rafTime: performance.now(),
+      isPlaying: false,
+      isQuickPreview: true,
+      isSeek: true,
+    });
   };
 
   // Quick Preview Animation Loop: constant geographic distance per second via approved hybrid duration model
@@ -383,10 +421,18 @@ export const EditorPage: React.FC<EditorPageProps> = ({
       setQuickPreviewState('finished');
       setQuickPreviewProgress(1);
       previewProgressRef.current = 1;
+      mapViewerRef.current?.updatePlaybackFrame({
+        progress: 1,
+        dtSec: 0,
+        rafTime: performance.now(),
+        isPlaying: false,
+        isQuickPreview: true,
+      });
       return;
     }
 
     previewLastTimeRef.current = performance.now();
+    lastQuickPreviewUIUpdateRef.current = performance.now();
 
     const tick = (now: number) => {
       const deltaSec = (now - previewLastTimeRef.current) / 1000;
@@ -394,15 +440,36 @@ export const EditorPage: React.FC<EditorPageProps> = ({
 
       const progressDelta = deltaSec / durationSec;
       const nextProgress = Math.min(1, previewProgressRef.current + progressDelta);
+      previewProgressRef.current = nextProgress;
 
       if (nextProgress >= 1) {
         previewProgressRef.current = 1;
         setQuickPreviewProgress(1);
         setQuickPreviewState('finished');
         previewRafRef.current = null;
+        mapViewerRef.current?.updatePlaybackFrame({
+          progress: 1,
+          dtSec: deltaSec,
+          rafTime: now,
+          isPlaying: false,
+          isQuickPreview: true,
+        });
       } else {
-        previewProgressRef.current = nextProgress;
-        setQuickPreviewProgress(nextProgress);
+        // High-frequency 60Hz update directly to MapViewer (camera, vehicle, SVG route)
+        mapViewerRef.current?.updatePlaybackFrame({
+          progress: nextProgress,
+          dtSec: deltaSec,
+          rafTime: now,
+          isPlaying: false,
+          isQuickPreview: true,
+        });
+
+        // Throttle React state update to ~30Hz (interval >= 33ms)
+        if (now - lastQuickPreviewUIUpdateRef.current >= 33) {
+          lastQuickPreviewUIUpdateRef.current = now;
+          setQuickPreviewProgress(nextProgress);
+        }
+
         previewRafRef.current = requestAnimationFrame(tick);
       }
     };
@@ -441,28 +508,74 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   const sortedCameraBlocks = (activeScene.cameraBlocks || []).slice().sort((a, b) => a.tRatio - b.tRatio);
   const activeCameraBlock = sortedCameraBlocks.filter((cb) => cb.tRatio <= playheadRatio).pop() || null;
 
+  const handleSeekTimeline = (t: number) => {
+    const clamped = Math.max(0, Math.min(duration, t));
+    currentTimeRef.current = clamped;
+    setCurrentTime(clamped);
+    const progress = duration > 0 ? clamped / duration : 0;
+    mapViewerRef.current?.updatePlaybackFrame({
+      progress,
+      currentTime: clamped,
+      dtSec: 0,
+      rafTime: performance.now(),
+      isPlaying,
+      isQuickPreview: false,
+      isSeek: true,
+    });
+  };
+
   // Animation timeline playhead loop
   useEffect(() => {
     if (!isPlaying) return;
     let lastTime = performance.now();
+    lastTimelineUIUpdateRef.current = performance.now();
     let frameId: number;
 
     const loop = (now: number) => {
       const deltaSec = ((now - lastTime) / 1000) * (isRendering ? 1 : playbackSpeed);
       lastTime = now;
 
-      setCurrentTime((prev) => {
-        const next = prev + deltaSec;
-        if (next >= duration) {
-          if (isRendering && renderAllScenes && activeSceneIndex < project.scenes.length - 1) {
-            setActiveSceneIndex((idx) => idx + 1);
-            return 0;
-          }
-          setIsPlaying(false);
-          return duration;
+      const nextTime = currentTimeRef.current + deltaSec;
+
+      if (nextTime >= duration) {
+        if (isRendering && renderAllScenes && activeSceneIndex < project.scenes.length - 1) {
+          currentTimeRef.current = 0;
+          setCurrentTime(0);
+          setActiveSceneIndex((idx) => idx + 1);
+          return;
         }
-        return next;
+        currentTimeRef.current = duration;
+        setCurrentTime(duration);
+        setIsPlaying(false);
+        mapViewerRef.current?.updatePlaybackFrame({
+          progress: 1,
+          currentTime: duration,
+          dtSec: deltaSec,
+          rafTime: now,
+          isPlaying: false,
+          isQuickPreview: false,
+        });
+        return;
+      }
+
+      currentTimeRef.current = nextTime;
+      const progress = duration > 0 ? nextTime / duration : 0;
+
+      // High-frequency 60Hz update directly to MapViewer (camera, vehicle, SVG route)
+      mapViewerRef.current?.updatePlaybackFrame({
+        progress,
+        currentTime: nextTime,
+        dtSec: deltaSec,
+        rafTime: now,
+        isPlaying: true,
+        isQuickPreview: false,
       });
+
+      // Throttle React state update to ~30Hz (interval >= 33ms)
+      if (now - lastTimelineUIUpdateRef.current >= 33) {
+        lastTimelineUIUpdateRef.current = now;
+        setCurrentTime(nextTime);
+      }
 
       frameId = requestAnimationFrame(loop);
     };
@@ -2007,7 +2120,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                   type="button"
                   onClick={() => {
                     if (currentTime >= duration) {
-                      setCurrentTime(0);
+                      handleSeekTimeline(0);
                       setIsPlaying(true);
                     } else {
                       setIsPlaying(!isPlaying);
@@ -2028,7 +2141,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                   max={duration}
                   step={0.1}
                   value={currentTime}
-                  onChange={(e) => setCurrentTime(parseFloat(e.target.value))}
+                  onChange={(e) => handleSeekTimeline(parseFloat(e.target.value))}
                   aria-label="Timeline scrubber"
                   className="flex-1 min-w-0 h-1.5 bg-[var(--panel-2)] rounded-lg appearance-none cursor-pointer accent-[var(--accent)]"
                 />
@@ -2079,6 +2192,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
           }`}
         >
           <MapViewer
+            ref={mapViewerRef}
             themeId={activeScene.mapThemeId}
             mapLabels={mapLabels}
             labelLang={labelLang || undefined}
@@ -2234,7 +2348,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                 }
               } else {
                 if (currentTime >= duration) {
-                  setCurrentTime(0);
+                  handleSeekTimeline(0);
                   setIsPlaying(true);
                 } else {
                   setIsPlaying(!isPlaying);
@@ -2299,7 +2413,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                     max={duration}
                     step={0.1}
                     value={currentTime}
-                    onChange={(e) => setCurrentTime(parseFloat(e.target.value))}
+                    onChange={(e) => handleSeekTimeline(parseFloat(e.target.value))}
                     className="w-full h-1.5 bg-[var(--panel-2)] rounded-lg appearance-none cursor-pointer accent-[var(--accent)]"
                   />
                 </div>
@@ -2329,7 +2443,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                       }}
                       onClick={(e) => {
                         e.stopPropagation();
-                        setCurrentTime(cb.tRatio * duration);
+                        handleSeekTimeline(cb.tRatio * duration);
                         setCameraMode(cb.kind);
                         if (cb.pitch !== undefined) setTilt(cb.pitch);
                         if (cb.zoom !== undefined) setFollowZoom(cb.zoom);

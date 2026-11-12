@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react';
 import maplibregl from 'maplibre-gl';
 import { Route, MapSign, CameraBlock, StepId, OverlayConfig, TransportType, CameraModePreset, AspectRatioOption, DestinationPreview, CanonicalRoute } from '../types';
 import { buildMapStyle } from '../utils/mapStyleBuilder';
@@ -20,31 +20,33 @@ function mapTransportTo3DModel(transport?: TransportType): ModelKind3D {
   return 'car';
 }
 
-/**
- * Calculates the homogeneous clip-space w coordinate for a geographic point.
- * In MapLibre's camera projection:
- * - w > 0.05 indicates the point is strictly in front of the camera's near clipping plane.
- * - w <= 0.05 indicates the point is behind the camera eye plane or within the near clip singularity zone.
- */
-function getCameraClipW(
-  mapInstance: maplibregl.Map,
-  lng: number,
-  lat: number,
-  ele: number = 0
-): number {
-  const tr = (mapInstance as any).transform;
-  if (!tr || !tr._pixelMatrix) return 1.0;
-  const m = tr._pixelMatrix;
-  const ws = tr.worldSize || 1;
-  const mc = maplibregl.MercatorCoordinate.fromLngLat([lng, lat], ele);
-  const x = mc.x * ws;
-  const y = mc.y * ws;
-  const z = mc.z * ws;
-  return m[3] * x + m[7] * y + m[11] * z + m[15];
+import {
+  computeOptionARouteProjection,
+  getCameraClipW,
+  type OptionARouteProjection,
+} from '../utils/routeProjection';
+
+export {
+  computeOptionARouteProjection,
+  getCameraClipW,
+  type OptionARouteProjection,
+};
+
+export interface PlaybackFrameParams {
+  progress: number;
+  currentTime?: number;
+  dtSec: number;
+  rafTime: number;
+  isPlaying: boolean;
+  isQuickPreview: boolean;
+  isSeek?: boolean;
 }
 
+export interface MapViewerHandle {
+  updatePlaybackFrame: (params: PlaybackFrameParams) => void;
+}
 
-interface MapViewerProps {
+export interface MapViewerProps {
   themeId: string;
   mapLabels?: boolean;
   labelLang?: string;
@@ -430,7 +432,7 @@ function renderVehicleShape(type: string | undefined, color: string, scale: numb
   }
 }
 
-export const MapViewer: React.FC<MapViewerProps> = ({
+export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
   themeId,
   mapLabels = true,
   labelLang,
@@ -477,7 +479,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   onMoveInteraction,
   onEndInteraction,
   onCancelInteraction,
-}) => {
+}, ref) => {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -523,6 +525,335 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   onCancelInteractionRef.current = onCancelInteraction;
   const currentStepRef = useRef<StepId>(currentStep);
   currentStepRef.current = currentStep;
+
+  // Direct SVG element refs for synchronous, zero-phase-lag 60 Hz playback updates
+  const svgPathWhiteRef = useRef<SVGPathElement | null>(null);
+  const svgPathColorRef = useRef<SVGPathElement | null>(null);
+  const svgStartDotRef = useRef<SVGCircleElement | null>(null);
+  const svgTipGroupRef = useRef<SVGGElement | null>(null);
+
+  const cameraBlocksRef = useRef(cameraBlocks);
+  cameraBlocksRef.current = cameraBlocks;
+  const cameraPresetRef = useRef(cameraPreset);
+  cameraPresetRef.current = cameraPreset;
+  const cameraModeRef = useRef(cameraMode);
+  cameraModeRef.current = cameraMode;
+  const tiltRef = useRef(tilt);
+  tiltRef.current = tilt;
+  const followZoomRef = useRef(followZoom);
+  followZoomRef.current = followZoom;
+  const rotateOffsetRef = useRef(rotateOffset);
+  rotateOffsetRef.current = rotateOffset;
+  const followOrientRef = useRef(followOrient);
+  followOrientRef.current = followOrient;
+  const distanceKmRef = useRef(distanceKm);
+  distanceKmRef.current = distanceKm;
+  const heightKmRef = useRef(heightKm);
+  heightKmRef.current = heightKm;
+  const orbitDirectionRef = useRef(orbitDirection);
+  orbitDirectionRef.current = orbitDirection;
+
+  // Single Authoritative Playback Clock imperative handle
+  useImperativeHandle(ref, () => ({
+    updatePlaybackFrame: (params: PlaybackFrameParams) => {
+      const map = mapRef.current;
+      if (!map || !routesRef.current[0]?.points?.length) return;
+
+      const progress = Math.max(0, Math.min(1, params.progress));
+      progressRef.current = progress;
+
+      const isPlaybackActive = Boolean(params.isPlaying || params.isQuickPreview);
+
+      // 1. Coordinated ThreeMapLayer update
+      if (threeMapLayerRef.current) {
+        threeMapLayerRef.current.setProgress(progress);
+        threeMapLayerRef.current.setContinuousRepaint(isPlaybackActive);
+      }
+
+      // Step check: if route step and not in quick preview, do not take over user's view
+      if (currentStepRef.current === 'route' && !params.isQuickPreview) return;
+      if (!isPlaybackActive && currentStepRef.current === 'signs') return;
+
+      // Resolve camera settings
+      const sortedBlocks = (cameraBlocksRef.current || []).slice().sort((a, b) => a.tRatio - b.tRatio);
+      const activeBlock = sortedBlocks.filter((cb) => cb.tRatio <= progress).pop();
+      const isFlyAlongPreset =
+        cameraPresetRef.current === 'fly_along' ||
+        (!cameraPresetRef.current &&
+          (!activeBlock || (activeBlock.kind === 'follow' && activeBlock.followOrient === 'heading')));
+      const effectiveMode =
+        cameraPresetRef.current === 'whole_tour'
+          ? 'still'
+          : activeBlock
+          ? activeBlock.kind
+          : cameraPresetRef.current === 'fly_along'
+          ? 'follow'
+          : cameraModeRef.current || 'follow';
+      const effectivePitch =
+        cameraPresetRef.current === 'whole_tour'
+          ? activeBlock?.pitch ?? (tiltRef.current !== 0 ? tiltRef.current : 10)
+          : activeBlock
+          ? activeBlock.pitch
+          : tiltRef.current !== 0
+          ? tiltRef.current
+          : isFlyAlongPreset
+          ? 50
+          : 0;
+      const effectiveZoom =
+        cameraPresetRef.current === 'whole_tour'
+          ? activeBlock?.zoom ?? followZoomRef.current
+          : activeBlock
+          ? activeBlock.zoom
+          : followZoomRef.current !== 8
+          ? followZoomRef.current
+          : isFlyAlongPreset
+          ? 12
+          : 8;
+      const effectiveRotate = activeBlock?.rotateOffset ?? rotateOffsetRef.current;
+      const effectiveFollowOrient =
+        activeBlock?.followOrient ?? (isFlyAlongPreset ? 'heading' : followOrientRef.current);
+      const effectiveDistKm = activeBlock?.distanceKm ?? distanceKmRef.current ?? 2.3;
+      const effectiveHeightKm = activeBlock?.heightKm ?? heightKmRef.current ?? 2.9;
+      const effectiveOrbitDir =
+        activeBlock?.orbitDirection ?? orbitDirectionRef.current ?? 'clockwise';
+
+      const pts = routesRef.current[0].points;
+
+      if (cameraPresetRef.current !== 'whole_tour') {
+        lastWholeTourKeyRef.current = '';
+      }
+
+      if (effectiveMode === 'still') {
+        followBearingRef.current = null;
+        followCenterRef.current = null;
+        map.triggerRepaint();
+
+        if (cameraPresetRef.current === 'whole_tour' && pts.length > 0) {
+          const tourKey = `${pts.length}-${pts[0]?.lat.toFixed(4)},${pts[0]?.lng.toFixed(
+            4
+          )}-${pts[pts.length - 1]?.lat.toFixed(4)},${pts[pts.length - 1]?.lng.toFixed(4)}`;
+          if (lastWholeTourKeyRef.current !== tourKey) {
+            lastWholeTourKeyRef.current = tourKey;
+            const bounds = computeRouteBounds(pts);
+            if (bounds) {
+              isProgrammaticCameraChangeRef.current = true;
+              try {
+                map.fitBounds(
+                  [
+                    [bounds.minLng, bounds.minLat],
+                    [bounds.maxLng, bounds.maxLat],
+                  ],
+                  {
+                    padding: { top: 60, bottom: 60, left: 60, right: 60 },
+                    pitch: effectivePitch !== undefined ? effectivePitch : 10,
+                    bearing: 0,
+                    duration: 800,
+                  }
+                );
+              } finally {
+                isProgrammaticCameraChangeRef.current = false;
+              }
+            }
+          }
+        } else if (activeBlock) {
+          isProgrammaticCameraChangeRef.current = true;
+          try {
+            map.easeTo({
+              center: activeBlock.center,
+              zoom: activeBlock.zoom,
+              pitch: activeBlock.pitch,
+              bearing: activeBlock.bearing,
+              duration: isPlaybackActive ? 120 : 0,
+            });
+          } finally {
+            isProgrammaticCameraChangeRef.current = false;
+          }
+        }
+      } else {
+        const snakeSample = getSmoothSnakePath(pts, progress);
+        if (!snakeSample) return;
+
+        const kinematics = threeMapLayerRef.current?.getKinematics(progress);
+        const vehicleLngLat: [number, number] = kinematics
+          ? [kinematics.worldPoint[0], kinematics.worldPoint[1]]
+          : [snakeSample.tipPoint.lng, snakeSample.tipPoint.lat];
+
+        const rawHeading = kinematics ? kinematics.headingDeg : snakeSample.headingDeg;
+        const normHeading = ((rawHeading % 360) + 360) % 360;
+
+        if (effectiveMode === 'follow') {
+          const targetBearing =
+            effectiveFollowOrient === 'heading'
+              ? ((normHeading + effectiveRotate) % 360 + 360) % 360
+              : ((effectiveRotate % 360) + 360) % 360;
+
+          const progressJump = Math.abs(progress - lastFollowProgressRef.current);
+          lastFollowProgressRef.current = progress;
+
+          // Authoritative rAF dtSec (Part C requirement)
+          const dtSec = Math.max(0.005, Math.min(0.05, params.dtSec));
+
+          let bearing: number;
+          if (
+            followBearingRef.current === null ||
+            !isPlaybackActive ||
+            progressJump > 0.08 ||
+            params.isSeek
+          ) {
+            bearing = targetBearing;
+            followBearingRef.current = targetBearing;
+          } else {
+            const diff = shortestAngularDiff(targetBearing, followBearingRef.current);
+            const lambdaBearing = 10.0;
+            const timeDecayFactor = 1 - Math.exp(-lambdaBearing * dtSec);
+            const unclampedStep = diff * timeDecayFactor;
+            const maxAngularSpeedDegPerSec = 240.0;
+            const maxStep = maxAngularSpeedDegPerSec * dtSec;
+            const step = Math.sign(unclampedStep) * Math.min(Math.abs(unclampedStep), maxStep);
+            const next = followBearingRef.current + step;
+            bearing = ((next % 360) + 360) % 360;
+            followBearingRef.current = bearing;
+          }
+
+          let centerPos: [number, number];
+          if (
+            followCenterRef.current === null ||
+            !isPlaybackActive ||
+            progressJump > 0.08 ||
+            params.isSeek
+          ) {
+            followCenterRef.current = [vehicleLngLat[0], vehicleLngLat[1]];
+            centerPos = vehicleLngLat;
+          } else {
+            const lambdaCenter = 10.0;
+            const decayFactor = 1 - Math.exp(-lambdaCenter * dtSec);
+            const prevCenter = followCenterRef.current;
+            const nextLng = prevCenter[0] + (vehicleLngLat[0] - prevCenter[0]) * decayFactor;
+            const nextLat = prevCenter[1] + (vehicleLngLat[1] - prevCenter[1]) * decayFactor;
+            followCenterRef.current = [nextLng, nextLat];
+            centerPos = followCenterRef.current;
+          }
+
+          isProgrammaticCameraChangeRef.current = true;
+          try {
+            map.jumpTo({
+              center: centerPos,
+              zoom: effectiveZoom,
+              pitch: effectivePitch,
+              bearing,
+            });
+          } finally {
+            isProgrammaticCameraChangeRef.current = false;
+          }
+        } else if (effectiveMode === 'tripod') {
+          const standOrigin: [number, number] = activeBlock
+            ? activeBlock.center
+            : [pts[0].lng, pts[0].lat];
+          const dLng = vehicleLngLat[0] - standOrigin[0];
+          const dLat = vehicleLngLat[1] - standOrigin[1];
+          const swivelBearing = (Math.atan2(dLng, dLat) * 180) / Math.PI;
+          const radPitch = Math.atan2(effectiveDistKm, effectiveHeightKm);
+          const computedPitch = Math.min(80, Math.max(10, Math.round((radPitch * 180) / Math.PI)));
+
+          isProgrammaticCameraChangeRef.current = true;
+          try {
+            map.jumpTo({
+              center: [
+                standOrigin[0] + dLng * 0.35,
+                standOrigin[1] + dLat * 0.35,
+              ],
+              zoom: effectiveZoom,
+              pitch: computedPitch,
+              bearing: swivelBearing,
+            });
+          } finally {
+            isProgrammaticCameraChangeRef.current = false;
+          }
+        } else if (effectiveMode === 'orbit') {
+          let blockProgress = progress;
+          if (activeBlock) {
+            const activeIdx = sortedBlocks.indexOf(activeBlock);
+            const nextBlock = sortedBlocks[activeIdx + 1];
+            const startT = activeBlock.tRatio;
+            const endT = nextBlock ? nextBlock.tRatio : 1;
+            blockProgress = endT > startT ? (progress - startT) / (endT - startT) : 0;
+          }
+          const dirMult = effectiveOrbitDir === 'anticlockwise' ? -1 : 1;
+          const orbitBearing = ((blockProgress * 360 * dirMult) % 360) + (activeBlock?.bearing || 0);
+
+          isProgrammaticCameraChangeRef.current = true;
+          try {
+            map.jumpTo({
+              center: vehicleLngLat,
+              zoom: effectiveZoom,
+              pitch: effectivePitch,
+              bearing: orbitBearing,
+            });
+          } finally {
+            isProgrammaticCameraChangeRef.current = false;
+          }
+        }
+      }
+
+      // Synchronize SVG Route Projection with the newly applied camera transform
+      const snakeSample = getSmoothSnakePath(pts, progress);
+      if (snakeSample) {
+        const activeRoute = routesRef.current[0];
+        const isAirTransportMode = [
+          'plane',
+          'sportsplane',
+          'floatplane',
+          'fighter',
+          'bomber',
+          'helicopter',
+          'drone',
+          'balloon',
+          'sailplane',
+          'paramotor',
+          'hangglider',
+          'paraglider',
+        ].includes(activeRoute?.transportType || '');
+        const hasFlightElevation = snakeSample.drawnPoints.some((p) => (p.ele || 0) > 0);
+        const isAirMode = isAirTransportMode || hasFlightElevation;
+        const shouldHideSvgLine = Boolean(activeRoute?.hideLine || (isAirMode && isPlaybackActive));
+
+        if (!shouldHideSvgLine) {
+          const proj = computeOptionARouteProjection(
+            map,
+            snakeSample.drawnPoints,
+            snakeSample.headingDeg
+          );
+          if (svgPathWhiteRef.current) svgPathWhiteRef.current.setAttribute('d', proj.d);
+          if (svgPathColorRef.current) svgPathColorRef.current.setAttribute('d', proj.d);
+          if (svgStartDotRef.current) {
+            if (proj.startDotPos) {
+              svgStartDotRef.current.setAttribute('cx', proj.startDotPos[0].toFixed(1));
+              svgStartDotRef.current.setAttribute('cy', proj.startDotPos[1].toFixed(1));
+              svgStartDotRef.current.style.display = '';
+            } else {
+              svgStartDotRef.current.style.display = 'none';
+            }
+          }
+          if (svgTipGroupRef.current) {
+            if (proj.tipPos) {
+              svgTipGroupRef.current.setAttribute(
+                'transform',
+                `translate(${proj.tipPos[0].toFixed(1)}, ${proj.tipPos[1].toFixed(1)}) rotate(${proj.headAngle.toFixed(1)})`
+              );
+              svgTipGroupRef.current.style.display = '';
+            } else {
+              svgTipGroupRef.current.style.display = 'none';
+            }
+          }
+        } else {
+          if (svgPathWhiteRef.current) svgPathWhiteRef.current.setAttribute('d', '');
+          if (svgPathColorRef.current) svgPathColorRef.current.setAttribute('d', '');
+          if (svgStartDotRef.current) svgStartDotRef.current.style.display = 'none';
+          if (svgTipGroupRef.current) svgTipGroupRef.current.style.display = 'none';
+        }
+      }
+    },
+  }));
 
   const [viewSize, setViewSize] = useState({ w: 0, h: 0 });
   const [, setRenderTick] = useState(0);
@@ -1571,91 +1902,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
             );
             const shouldHideSvgLine = Boolean(route.hideLine || (isAirMode && isPlaybackActive));
 
-            // Perspective-safe near-plane frustum projection (Option A):
-            // Prevents raw map.project() from dividing by negative w coordinates for points behind the camera,
-            // which causes inverted screen reflections and unwanted diagonal cross-viewport lines in tilted Fly Along views.
-            const W_NEAR_MIN = 0.05;
-            const projectedSubpaths: [number, number][][] = [];
-            let currentProjSegment: [number, number][] = [];
-            let lastPx = -9999;
-            let lastPy = -9999;
-
-            if (currentPoints.length === 1) {
-              const w0 = getCameraClipW(map, currentPoints[0].lng, currentPoints[0].lat, currentPoints[0].ele || 0);
-              if (w0 > W_NEAR_MIN) {
-                const p = map.project([currentPoints[0].lng, currentPoints[0].lat]);
-                currentProjSegment.push([p.x, p.y]);
-                projectedSubpaths.push(currentProjSegment);
-              }
-            } else {
-              for (let i = 0; i < currentPoints.length - 1; i++) {
-                const p0 = currentPoints[i];
-                const p1 = currentPoints[i + 1];
-                const w0 = getCameraClipW(map, p0.lng, p0.lat, p0.ele || 0);
-                const w1 = getCameraClipW(map, p1.lng, p1.lat, p1.ele || 0);
-
-                if (w0 > W_NEAR_MIN && w1 > W_NEAR_MIN) {
-                  // Both points in front of camera
-                  if (currentProjSegment.length === 0) {
-                    const pr0 = map.project([p0.lng, p0.lat]);
-                    currentProjSegment.push([pr0.x, pr0.y]);
-                    lastPx = pr0.x;
-                    lastPy = pr0.y;
-                  }
-                  const pr1 = map.project([p1.lng, p1.lat]);
-                  if (Math.abs(pr1.x - lastPx) >= 1.5 || Math.abs(pr1.y - lastPy) >= 1.5 || i === currentPoints.length - 2) {
-                    currentProjSegment.push([pr1.x, pr1.y]);
-                    lastPx = pr1.x;
-                    lastPy = pr1.y;
-                  }
-                } else if (w0 <= W_NEAR_MIN && w1 > W_NEAR_MIN) {
-                  // Crossing from behind camera into view frustum: clip entry at near plane
-                  if (currentProjSegment.length > 0) {
-                    projectedSubpaths.push(currentProjSegment);
-                    currentProjSegment = [];
-                  }
-                  const t = Math.max(0, Math.min(1, (W_NEAR_MIN - w0) / (w1 - w0)));
-                  const clippedLng = p0.lng + t * (p1.lng - p0.lng);
-                  const clippedLat = p0.lat + t * (p1.lat - p0.lat);
-                  const cp = map.project([clippedLng, clippedLat]);
-                  const pr1 = map.project([p1.lng, p1.lat]);
-
-                  currentProjSegment.push([cp.x, cp.y]);
-                  currentProjSegment.push([pr1.x, pr1.y]);
-                  lastPx = pr1.x;
-                  lastPy = pr1.y;
-                } else if (w0 > W_NEAR_MIN && w1 <= W_NEAR_MIN) {
-                  // Crossing from view frustum to behind camera: clip exit at near plane
-                  if (currentProjSegment.length === 0) {
-                    const pr0 = map.project([p0.lng, p0.lat]);
-                    currentProjSegment.push([pr0.x, pr0.y]);
-                  }
-                  const t = Math.max(0, Math.min(1, (W_NEAR_MIN - w0) / (w1 - w0)));
-                  const clippedLng = p0.lng + t * (p1.lng - p0.lng);
-                  const clippedLat = p0.lat + t * (p1.lat - p0.lat);
-                  const cp = map.project([clippedLng, clippedLat]);
-
-                  currentProjSegment.push([cp.x, cp.y]);
-                  projectedSubpaths.push(currentProjSegment);
-                  currentProjSegment = [];
-                  lastPx = -9999;
-                  lastPy = -9999;
-                } else {
-                  // Both points behind camera: safely isolate and do not connect across invisible section
-                  if (currentProjSegment.length > 0) {
-                    projectedSubpaths.push(currentProjSegment);
-                    currentProjSegment = [];
-                    lastPx = -9999;
-                    lastPy = -9999;
-                  }
-                }
-              }
-
-              if (currentProjSegment.length > 0) {
-                projectedSubpaths.push(currentProjSegment);
-              }
-            }
-
+            const isPrimaryActiveRoute = route === routes[0];
             const strokeW = Math.max(
               3,
               ((route.width !== undefined && route.width <= 4) ? route.width : 3.5) * scale
@@ -1667,37 +1914,12 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                 ? `0.1 ${strokeW * 2}`
                 : undefined;
 
-            // Generate SVG d with disjoint M commands between subpaths so invisible sections are never bridged
-            const d = projectedSubpaths
-              .filter((sub) => sub.length >= 2)
-              .map((sub) =>
-                sub.map((p, idx) => `${idx ? 'L' : 'M'}${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join('')
-              )
-              .join(' ');
-
-            // Compute arrow heading and position at the active tip of the line
-            let headAngle = 0;
-            let tipPos: [number, number] | null = null;
-            if (projectedSubpaths.length > 0) {
-              const lastSub = projectedSubpaths[projectedSubpaths.length - 1];
-              if (lastSub.length >= 2) {
-                const tip = lastSub[lastSub.length - 1];
-                const prev = lastSub[lastSub.length - 2];
-                headAngle = (Math.atan2(tip[1] - prev[1], tip[0] - prev[0]) * 180) / Math.PI;
-                tipPos = tip;
-              } else if (lastSub.length === 1) {
-                tipPos = lastSub[0];
-                headAngle = (snakeSample.headingDeg - map.getBearing() - 90);
-              }
-            }
-
-            // Start Dot position (only rendered if start coordinate is in front of camera near plane)
-            const wStart = getCameraClipW(map, currentPoints[0].lng, currentPoints[0].lat, currentPoints[0].ele || 0);
-            const startDotPos: [number, number] | null =
-              wStart > W_NEAR_MIN ? (() => {
-                const sp = map.project([currentPoints[0].lng, currentPoints[0].lat]);
-                return [sp.x, sp.y];
-              })() : null;
+            // Perspective-safe near-plane frustum projection (Option A)
+            const proj = computeOptionARouteProjection(map, currentPoints, snakeSample.headingDeg);
+            const d = proj.d;
+            const startDotPos = proj.startDotPos;
+            const tipPos = proj.tipPos;
+            const headAngle = proj.headAngle;
 
             return (
               <g key={route.id}>
@@ -1705,6 +1927,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                 {d && !shouldHideSvgLine && (
                   <>
                     <path
+                      ref={isPrimaryActiveRoute ? svgPathWhiteRef : undefined}
                       d={d}
                       fill="none"
                       stroke="#ffffff"
@@ -1715,6 +1938,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                       opacity={0.9}
                     />
                     <path
+                      ref={isPrimaryActiveRoute ? svgPathColorRef : undefined}
                       d={d}
                       fill="none"
                       stroke={activeColor}
@@ -1733,6 +1957,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                 {/* Start Dot (rendered only when start coordinate is in front of camera) */}
                 {startDotPos && (
                   <circle
+                    ref={isPrimaryActiveRoute ? svgStartDotRef : undefined}
                     cx={startDotPos[0]}
                     cy={startDotPos[1]}
                     r={Math.max(4, strokeW * 0.9)}
@@ -1743,7 +1968,10 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                 )}
                 {/* Animated Vehicle / Symbol at Tip with SymbolScale & Multi-Leg transport */}
                 {tipPos && !shouldHideSvgLine && (
-                  <g transform={`translate(${tipPos[0]}, ${tipPos[1]}) rotate(${headAngle})`}>
+                  <g
+                    ref={isPrimaryActiveRoute ? svgTipGroupRef : undefined}
+                    transform={`translate(${tipPos[0]}, ${tipPos[1]}) rotate(${headAngle})`}
+                  >
                     {renderVehicleShape(
                       activeTransport,
                       activeColor,
@@ -2535,4 +2763,4 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       })()}
     </div>
   );
-};
+});
