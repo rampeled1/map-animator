@@ -20,6 +20,29 @@ function mapTransportTo3DModel(transport?: TransportType): ModelKind3D {
   return 'car';
 }
 
+/**
+ * Calculates the homogeneous clip-space w coordinate for a geographic point.
+ * In MapLibre's camera projection:
+ * - w > 0.05 indicates the point is strictly in front of the camera's near clipping plane.
+ * - w <= 0.05 indicates the point is behind the camera eye plane or within the near clip singularity zone.
+ */
+function getCameraClipW(
+  mapInstance: maplibregl.Map,
+  lng: number,
+  lat: number,
+  ele: number = 0
+): number {
+  const tr = (mapInstance as any).transform;
+  if (!tr || !tr._pixelMatrix) return 1.0;
+  const m = tr._pixelMatrix;
+  const ws = tr.worldSize || 1;
+  const mc = maplibregl.MercatorCoordinate.fromLngLat([lng, lat], ele);
+  const x = mc.x * ws;
+  const y = mc.y * ws;
+  const z = mc.z * ws;
+  return m[3] * x + m[7] * y + m[11] * z + m[15];
+}
+
 
 interface MapViewerProps {
   themeId: string;
@@ -833,18 +856,16 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     // Check if a timeline cameraBlock overrides the mode at this playhead ratio
     const sortedBlocks = cameraBlocks.slice().sort((a, b) => a.tRatio - b.tRatio);
     const activeBlock = sortedBlocks.filter((cb) => cb.tRatio <= progress).pop();
-    const isFlyAlongPreset = activeBlock
-      ? activeBlock.kind === 'follow' && activeBlock.followOrient === 'heading'
-      : (cameraPreset === 'fly_along' || (!cameraPreset && !activeBlock));
-    const effectiveMode = activeBlock
-      ? activeBlock.kind
-      : (cameraPreset === 'whole_tour' ? 'still' : (cameraMode || 'follow'));
-    const effectivePitch = activeBlock
-      ? activeBlock.pitch
-      : (tilt !== 0 ? tilt : (isFlyAlongPreset ? 50 : (cameraPreset === 'whole_tour' ? 10 : 0)));
-    const effectiveZoom = activeBlock
-      ? activeBlock.zoom
-      : (followZoom !== 8 ? followZoom : (isFlyAlongPreset ? 12 : 8));
+    const isFlyAlongPreset = cameraPreset === 'fly_along' || (!cameraPreset && (!activeBlock || (activeBlock.kind === 'follow' && activeBlock.followOrient === 'heading')));
+    const effectiveMode = cameraPreset === 'whole_tour'
+      ? 'still'
+      : (activeBlock ? activeBlock.kind : (cameraPreset === 'fly_along' ? 'follow' : (cameraMode || 'follow')));
+    const effectivePitch = cameraPreset === 'whole_tour'
+      ? (activeBlock?.pitch ?? (tilt !== 0 ? tilt : 10))
+      : (activeBlock ? activeBlock.pitch : (tilt !== 0 ? tilt : (isFlyAlongPreset ? 50 : 0)));
+    const effectiveZoom = cameraPreset === 'whole_tour'
+      ? (activeBlock?.zoom ?? followZoom)
+      : (activeBlock ? activeBlock.zoom : (followZoom !== 8 ? followZoom : (isFlyAlongPreset ? 12 : 8)));
     const effectiveRotate = activeBlock?.rotateOffset ?? rotateOffset;
     const effectiveFollowOrient = activeBlock?.followOrient ?? (isFlyAlongPreset ? 'heading' : followOrient);
     const effectiveDistKm = activeBlock?.distanceKm ?? distanceKm ?? 2.3;
@@ -929,11 +950,11 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       const now = performance.now();
       const lastTime = lastFollowTimeRef.current ?? now;
       lastFollowTimeRef.current = now;
-      // Cap delta time to [0.001, 0.1]s to guard against background tab pause spikes
-      const dtSec = Math.max(0.001, Math.min(0.1, (now - lastTime) / 1000));
+      // Clamp delta time to [0.005, 0.05]s (20-200 FPS) to eliminate React commit timing jitter
+      const dtSec = Math.max(0.005, Math.min(0.05, (now - lastTime) / 1000));
 
       let bearing: number;
-      if (followBearingRef.current === null || !isPlaying || progressJump > 0.05) {
+      if (followBearingRef.current === null || !isPlaying || progressJump > 0.08) {
         // Immediate orientation lock on preset change, pause, seek, or restart
         bearing = targetBearing;
         followBearingRef.current = targetBearing;
@@ -941,13 +962,13 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         // Continuous shortest-signed-angular-difference time-based smoothing
         // Eliminates 360° spins across North/South and smooths curve transitions
         const diff = shortestAngularDiff(targetBearing, followBearingRef.current);
-        // Exponential decay rate lambda = 8.0 s^-1 gives responsive tracking (~0.35s settling time)
-        const lambda = 8.0;
-        const timeDecayFactor = 1 - Math.exp(-lambda * dtSec);
+        // Harmonized decay rate lambda = 10.0 s^-1 gives responsive tracking (~0.15s settling time)
+        const lambdaBearing = 10.0;
+        const timeDecayFactor = 1 - Math.exp(-lambdaBearing * dtSec);
         const unclampedStep = diff * timeDecayFactor;
-        // Bounded angular speed in degrees per second: 180°/sec ensures realistic, smooth rotation
-        // across sharp hairpins without whipping, identical across 30, 60, and 120 FPS
-        const maxAngularSpeedDegPerSec = 180.0;
+        // Bounded angular speed in degrees per second: 240°/sec ensures realistic, smooth rotation
+        // across sharp curves and roundabouts without whipping or angular backlog
+        const maxAngularSpeedDegPerSec = 240.0;
         const maxStep = maxAngularSpeedDegPerSec * dtSec;
         const step = Math.sign(unclampedStep) * Math.min(Math.abs(unclampedStep), maxStep);
         const next = followBearingRef.current + step;
@@ -955,16 +976,15 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         followBearingRef.current = bearing;
       }
 
-      // Frame-rate-independent camera center interpolation (lambda = 15 s^-1)
+      // Frame-rate-independent camera center interpolation harmonized with bearing (lambda = 10 s^-1)
       let centerPos: [number, number];
-      if (followCenterRef.current === null || !isPlaying || progressJump > 0.05) {
+      if (followCenterRef.current === null || !isPlaying || progressJump > 0.08) {
         // Immediate position lock on preset change, pause, seek, or restart
         followCenterRef.current = [vehicleLngLat[0], vehicleLngLat[1]];
         centerPos = vehicleLngLat;
       } else {
-        // Continuous time-based exponential decay damping
-        // Lambda = 15.0 s^-1 gives responsive tracking (~0.15s settling time, max lag < 1.5m @ 60 km/h)
-        const lambdaCenter = 15.0;
+        // Harmonized decay rate lambda = 10.0 s^-1 matching bearing rate to prevent lateral phase drift on turns
+        const lambdaCenter = 10.0;
         const decayFactor = 1 - Math.exp(-lambdaCenter * dtSec);
         const prevCenter = followCenterRef.current;
         const nextLng = prevCenter[0] + (vehicleLngLat[0] - prevCenter[0]) * decayFactor;
@@ -975,22 +995,12 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
       isProgrammaticCameraChangeRef.current = true;
       try {
-        if (isPlaying) {
-          map.jumpTo({
-            center: centerPos,
-            zoom: effectiveZoom,
-            pitch: effectivePitch,
-            bearing,
-          });
-        } else {
-          map.easeTo({
-            center: centerPos,
-            zoom: effectiveZoom,
-            pitch: effectivePitch,
-            bearing,
-            duration: 100,
-          });
-        }
+        map.jumpTo({
+          center: centerPos,
+          zoom: effectiveZoom,
+          pitch: effectivePitch,
+          bearing,
+        });
       } finally {
         isProgrammaticCameraChangeRef.current = false;
       }
@@ -1549,25 +1559,91 @@ export const MapViewer: React.FC<MapViewerProps> = ({
             );
             const shouldHideSvgLine = Boolean(route.hideLine || (isAirMode && isPlaybackActive));
 
-            const projected: [number, number][] = [];
+            // Perspective-safe near-plane frustum projection (Option A):
+            // Prevents raw map.project() from dividing by negative w coordinates for points behind the camera,
+            // which causes inverted screen reflections and unwanted diagonal cross-viewport lines in tilted Fly Along views.
+            const W_NEAR_MIN = 0.05;
+            const projectedSubpaths: [number, number][][] = [];
+            let currentProjSegment: [number, number][] = [];
             let lastPx = -9999;
             let lastPy = -9999;
-            for (let i = 0; i < currentPoints.length; i++) {
-              const pt = currentPoints[i];
-              if (i === 0 || i === currentPoints.length - 1) {
-                const p = map.project([pt.lng, pt.lat]);
-                projected.push([p.x, p.y]);
-                lastPx = p.x;
-                lastPy = p.y;
-              } else {
-                const p = map.project([pt.lng, pt.lat]);
-                if (Math.abs(p.x - lastPx) >= 1.5 || Math.abs(p.y - lastPy) >= 1.5) {
-                  projected.push([p.x, p.y]);
-                  lastPx = p.x;
-                  lastPy = p.y;
+
+            if (currentPoints.length === 1) {
+              const w0 = getCameraClipW(map, currentPoints[0].lng, currentPoints[0].lat, currentPoints[0].ele || 0);
+              if (w0 > W_NEAR_MIN) {
+                const p = map.project([currentPoints[0].lng, currentPoints[0].lat]);
+                currentProjSegment.push([p.x, p.y]);
+                projectedSubpaths.push(currentProjSegment);
+              }
+            } else {
+              for (let i = 0; i < currentPoints.length - 1; i++) {
+                const p0 = currentPoints[i];
+                const p1 = currentPoints[i + 1];
+                const w0 = getCameraClipW(map, p0.lng, p0.lat, p0.ele || 0);
+                const w1 = getCameraClipW(map, p1.lng, p1.lat, p1.ele || 0);
+
+                if (w0 > W_NEAR_MIN && w1 > W_NEAR_MIN) {
+                  // Both points in front of camera
+                  if (currentProjSegment.length === 0) {
+                    const pr0 = map.project([p0.lng, p0.lat]);
+                    currentProjSegment.push([pr0.x, pr0.y]);
+                    lastPx = pr0.x;
+                    lastPy = pr0.y;
+                  }
+                  const pr1 = map.project([p1.lng, p1.lat]);
+                  if (Math.abs(pr1.x - lastPx) >= 1.5 || Math.abs(pr1.y - lastPy) >= 1.5 || i === currentPoints.length - 2) {
+                    currentProjSegment.push([pr1.x, pr1.y]);
+                    lastPx = pr1.x;
+                    lastPy = pr1.y;
+                  }
+                } else if (w0 <= W_NEAR_MIN && w1 > W_NEAR_MIN) {
+                  // Crossing from behind camera into view frustum: clip entry at near plane
+                  if (currentProjSegment.length > 0) {
+                    projectedSubpaths.push(currentProjSegment);
+                    currentProjSegment = [];
+                  }
+                  const t = Math.max(0, Math.min(1, (W_NEAR_MIN - w0) / (w1 - w0)));
+                  const clippedLng = p0.lng + t * (p1.lng - p0.lng);
+                  const clippedLat = p0.lat + t * (p1.lat - p0.lat);
+                  const cp = map.project([clippedLng, clippedLat]);
+                  const pr1 = map.project([p1.lng, p1.lat]);
+
+                  currentProjSegment.push([cp.x, cp.y]);
+                  currentProjSegment.push([pr1.x, pr1.y]);
+                  lastPx = pr1.x;
+                  lastPy = pr1.y;
+                } else if (w0 > W_NEAR_MIN && w1 <= W_NEAR_MIN) {
+                  // Crossing from view frustum to behind camera: clip exit at near plane
+                  if (currentProjSegment.length === 0) {
+                    const pr0 = map.project([p0.lng, p0.lat]);
+                    currentProjSegment.push([pr0.x, pr0.y]);
+                  }
+                  const t = Math.max(0, Math.min(1, (W_NEAR_MIN - w0) / (w1 - w0)));
+                  const clippedLng = p0.lng + t * (p1.lng - p0.lng);
+                  const clippedLat = p0.lat + t * (p1.lat - p0.lat);
+                  const cp = map.project([clippedLng, clippedLat]);
+
+                  currentProjSegment.push([cp.x, cp.y]);
+                  projectedSubpaths.push(currentProjSegment);
+                  currentProjSegment = [];
+                  lastPx = -9999;
+                  lastPy = -9999;
+                } else {
+                  // Both points behind camera: safely isolate and do not connect across invisible section
+                  if (currentProjSegment.length > 0) {
+                    projectedSubpaths.push(currentProjSegment);
+                    currentProjSegment = [];
+                    lastPx = -9999;
+                    lastPy = -9999;
+                  }
                 }
               }
+
+              if (currentProjSegment.length > 0) {
+                projectedSubpaths.push(currentProjSegment);
+              }
             }
+
             const strokeW = Math.max(
               3,
               ((route.width !== undefined && route.width <= 4) ? route.width : 3.5) * scale
@@ -1578,25 +1654,38 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                 : route.style === 'dotted'
                 ? `0.1 ${strokeW * 2}`
                 : undefined;
-            const d =
-              projected.length >= 2
-                ? projected
-                    .map((p, idx) => `${idx ? 'L' : 'M'}${p[0].toFixed(1)} ${p[1].toFixed(1)}`)
-                    .join('')
-                : '';
 
-            // Compute arrow heading at the tip of the line
+            // Generate SVG d with disjoint M commands between subpaths so invisible sections are never bridged
+            const d = projectedSubpaths
+              .filter((sub) => sub.length >= 2)
+              .map((sub) =>
+                sub.map((p, idx) => `${idx ? 'L' : 'M'}${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join('')
+              )
+              .join(' ');
+
+            // Compute arrow heading and position at the active tip of the line
             let headAngle = 0;
             let tipPos: [number, number] | null = null;
-            if (projected.length >= 2) {
-              const tip = projected[projected.length - 1];
-              const prev = projected[projected.length - 2];
-              headAngle = (Math.atan2(tip[1] - prev[1], tip[0] - prev[0]) * 180) / Math.PI;
-              tipPos = tip;
-            } else if (projected.length === 1) {
-              tipPos = projected[0];
-              headAngle = (snakeSample.headingDeg - map.getBearing() - 90);
+            if (projectedSubpaths.length > 0) {
+              const lastSub = projectedSubpaths[projectedSubpaths.length - 1];
+              if (lastSub.length >= 2) {
+                const tip = lastSub[lastSub.length - 1];
+                const prev = lastSub[lastSub.length - 2];
+                headAngle = (Math.atan2(tip[1] - prev[1], tip[0] - prev[0]) * 180) / Math.PI;
+                tipPos = tip;
+              } else if (lastSub.length === 1) {
+                tipPos = lastSub[0];
+                headAngle = (snakeSample.headingDeg - map.getBearing() - 90);
+              }
             }
+
+            // Start Dot position (only rendered if start coordinate is in front of camera near plane)
+            const wStart = getCameraClipW(map, currentPoints[0].lng, currentPoints[0].lat, currentPoints[0].ele || 0);
+            const startDotPos: [number, number] | null =
+              wStart > W_NEAR_MIN ? (() => {
+                const sp = map.project([currentPoints[0].lng, currentPoints[0].lat]);
+                return [sp.x, sp.y];
+              })() : null;
 
             return (
               <g key={route.id}>
@@ -1629,15 +1718,17 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                     />
                   </>
                 )}
-                {/* Start Dot */}
-                <circle
-                  cx={projected[0][0]}
-                  cy={projected[0][1]}
-                  r={Math.max(4, strokeW * 0.9)}
-                  fill="#fff"
-                  stroke={route.color || '#ff4d2e'}
-                  strokeWidth={Math.max(2, strokeW * 0.45)}
-                />
+                {/* Start Dot (rendered only when start coordinate is in front of camera) */}
+                {startDotPos && (
+                  <circle
+                    cx={startDotPos[0]}
+                    cy={startDotPos[1]}
+                    r={Math.max(4, strokeW * 0.9)}
+                    fill="#fff"
+                    stroke={route.color || '#ff4d2e'}
+                    strokeWidth={Math.max(2, strokeW * 0.45)}
+                  />
+                )}
                 {/* Animated Vehicle / Symbol at Tip with SymbolScale & Multi-Leg transport */}
                 {tipPos && !shouldHideSvgLine && (
                   <g transform={`translate(${tipPos[0]}, ${tipPos[1]}) rotate(${headAngle})`}>

@@ -825,10 +825,17 @@ export const EditorPage: React.FC<EditorPageProps> = ({
 
   const handleUpdateActiveCameraBlock = (updates: Partial<CameraBlock>) => {
     if (!activeCameraBlock) return;
-    const updatedBlocks = (activeScene.cameraBlocks || []).map((cb) =>
-      cb.id === activeCameraBlock.id ? { ...cb, ...updates } : cb
-    );
-    updateActiveScene({ cameraBlocks: updatedBlocks });
+    onUpdateProject((prev) => ({
+      ...prev,
+      updatedAt: Date.now(),
+      scenes: prev.scenes.map((s, idx) => {
+        if (idx !== activeSceneIndex) return s;
+        const updatedBlocks = (s.cameraBlocks || []).map((cb) =>
+          cb.id === activeCameraBlock.id ? { ...cb, ...updates } : cb
+        );
+        return { ...s, cameraBlocks: updatedBlocks };
+      }),
+    }));
   };
 
   const handleDeleteCameraBlock = (id: string) => {
