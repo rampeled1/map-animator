@@ -255,6 +255,7 @@ export interface MapSign {
   triggerMode: 'always' | 'onPassed' | 'whilePassing';
   pauseSec?: number; // up to 20s
   size: number;
+  routeDistanceKm?: number; // Distance in km along canonical route (B11)
 }
 
 export interface CameraBlock {

@@ -37,7 +37,7 @@ import {
   MobileStageId,
   MobileSheetSnap,
 } from '../utils/useResponsiveLayout';
-import { Play, Pause, HelpCircle, Download, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { Play, Pause, HelpCircle, Download, PanelLeftClose, PanelLeftOpen, RotateCcw } from 'lucide-react';
 import { SnapProfile, getRoadRoute } from '../utils/roadRouter';
 import { calculateTrackStats } from '../utils/gpxParser';
 import { exportProjectFile } from '../utils/projectStorage';
@@ -354,6 +354,12 @@ export const EditorPage: React.FC<EditorPageProps> = ({
     setQuickPreviewState('playing');
   };
 
+  const handleSeekQuickPreview = (p: number) => {
+    const clamped = Math.max(0, Math.min(1, p));
+    previewProgressRef.current = clamped;
+    setQuickPreviewProgress(clamped);
+  };
+
   // Quick Preview Animation Loop: constant geographic distance per second
   useEffect(() => {
     if (quickPreviewState !== 'playing') {
@@ -655,11 +661,52 @@ export const EditorPage: React.FC<EditorPageProps> = ({
 
   const handleUpdateCanonicalRoute = (updatedCanonical: CanonicalRoute, isCalculationResult?: boolean) => {
     if (isCalculationResult) {
-      onUpdateProject((prev) => ({
-        ...prev,
-        updatedAt: Date.now(),
-        routes: [updatedCanonical],
-      }));
+      onUpdateProject((prev) => {
+        const newGeom = updatedCanonical.calculatedGeometry || [];
+        let newEngine: CatmullRom3DPath | null = null;
+        if (newGeom.length >= 2) {
+          newEngine = new CatmullRom3DPath(newGeom);
+        }
+        const newTotalKm = newEngine?.getTotalDistanceKm() || updatedCanonical.stats?.distanceKm || 0;
+
+        const updatedScenes = prev.scenes.map((scene) => {
+          if (!scene.signs || scene.signs.length === 0) return scene;
+          const updatedSigns = scene.signs.map((sign) => {
+            if (sign.style === 'photo' && sign.routeDistanceKm !== undefined && newTotalKm > 0) {
+              const clampedDist = Math.min(sign.routeDistanceKm, newTotalKm);
+              let updatedLng = sign.lng;
+              let updatedLat = sign.lat;
+              if (newEngine) {
+                const pGeo = clampedDist / newTotalKm;
+                const u = newEngine.getSplineParameterAtDistanceProgress(pGeo);
+                const sample = newEngine.sample(u);
+                if (sample) {
+                  updatedLng = sample.worldPoint[0];
+                  updatedLat = sample.worldPoint[1];
+                }
+              }
+              return {
+                ...sign,
+                lng: updatedLng,
+                lat: updatedLat,
+                routeDistanceKm: clampedDist,
+              };
+            }
+            return sign;
+          });
+          return {
+            ...scene,
+            signs: updatedSigns,
+          };
+        });
+
+        return {
+          ...prev,
+          updatedAt: Date.now(),
+          routes: [updatedCanonical],
+          scenes: updatedScenes,
+        };
+      });
     } else {
       invalidateRouteAndStopPreview();
       pushUndoSnapshot();
@@ -825,8 +872,8 @@ export const EditorPage: React.FC<EditorPageProps> = ({
     if (preset === 'fly_along') {
       setCameraMode('follow');
       setFollowOrient('heading');
-      setTilt(55);
-      setFollowZoom(15);
+      setTilt(50);
+      setFollowZoom(12);
     } else if (preset === 'follow_north_up') {
       setCameraMode('follow');
       setFollowOrient('north');
@@ -1295,6 +1342,8 @@ export const EditorPage: React.FC<EditorPageProps> = ({
           <SignsEditorPanel
             signs={activeScene.signs}
             routePoints={projectRoutes[0]?.points || canonicalRoute?.calculatedGeometry || []}
+            totalRouteDistanceKm={totalPreviewDistanceKm}
+            pathEngine={previewPathEngine}
             defaultCenter={
               projectRoutes[0]?.points?.length
                 ? [
@@ -1965,6 +2014,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
             size={project.size}
             routes={projectRoutes}
             signs={activeScene.signs}
+            totalRouteDistanceKm={totalPreviewDistanceKm}
             currentStep={currentStep}
             currentTime={currentTime}
             duration={duration}
@@ -2125,21 +2175,55 @@ export const EditorPage: React.FC<EditorPageProps> = ({
           </button>
 
           <div className="flex-1 flex flex-col space-y-1 relative min-w-0">
-            <div className="flex justify-between text-[11px] text-[var(--muted)] font-mono">
-              <span>{currentTime.toFixed(1)}s</span>
-              <span>{duration.toFixed(1)}s</span>
-            </div>
-            <div className="relative flex items-center">
-              <input
-                type="range"
-                min={0}
-                max={duration}
-                step={0.1}
-                value={currentTime}
-                onChange={(e) => setCurrentTime(parseFloat(e.target.value))}
-                className="w-full h-1.5 bg-[var(--panel-2)] rounded-lg appearance-none cursor-pointer accent-[var(--accent)]"
-              />
-            </div>
+            {currentStep === 'route' ? (
+              <>
+                <div className="flex justify-between text-[11px] text-[var(--muted)] font-mono">
+                  <span>
+                    {totalPreviewDistanceKm > 0
+                      ? `${(quickPreviewProgress * totalPreviewDistanceKm).toFixed(1)} km (${Math.round(quickPreviewProgress * 100)}%)`
+                      : '0.0 km (0%)'}
+                  </span>
+                  <span>
+                    {totalPreviewDistanceKm > 0
+                      ? `${remainingPreviewDistanceKm.toFixed(1)} km left / ${totalPreviewDistanceKm.toFixed(1)} km`
+                      : '0.0 km'}
+                  </span>
+                </div>
+                <div className="relative flex items-center">
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.001}
+                    value={quickPreviewProgress}
+                    onChange={(e) => {
+                      const p = parseFloat(e.target.value);
+                      handleSeekQuickPreview(p);
+                    }}
+                    className="w-full h-1.5 bg-[var(--panel-2)] rounded-lg appearance-none cursor-pointer accent-teal-400"
+                    aria-label="Route Preview Progress"
+                  />
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex justify-between text-[11px] text-[var(--muted)] font-mono">
+                  <span>{currentTime.toFixed(1)}s</span>
+                  <span>{duration.toFixed(1)}s</span>
+                </div>
+                <div className="relative flex items-center">
+                  <input
+                    type="range"
+                    min={0}
+                    max={duration}
+                    step={0.1}
+                    value={currentTime}
+                    onChange={(e) => setCurrentTime(parseFloat(e.target.value))}
+                    className="w-full h-1.5 bg-[var(--panel-2)] rounded-lg appearance-none cursor-pointer accent-[var(--accent)]"
+                  />
+                </div>
+              </>
+            )}
 
             {/* Camera keyframe blocks lane (matching snapshots & native classes) */}
             {(currentStep === 'camera' || (activeScene.cameraBlocks && activeScene.cameraBlocks.length > 0)) && (
@@ -2213,34 +2297,72 @@ export const EditorPage: React.FC<EditorPageProps> = ({
             )}
           </div>
 
-          <div className="flex items-center space-x-2 shrink-0">
-            <select
-              value={duration}
-              onChange={(e) => updateActiveScene({ duration: Number(e.target.value) })}
-              className="text-xs font-semibold text-[var(--text)] px-2 py-1 bg-[var(--panel-2)] rounded-md border border-[var(--border)] min-h-[32px]"
-              title="Scene animation duration"
-            >
-              <option value={5}>5s</option>
-              <option value={10}>10s</option>
-              <option value={15}>15s</option>
-              <option value={20}>20s</option>
-              <option value={30}>30s</option>
-              <option value={45}>45s</option>
-              <option value={60}>60s</option>
-              <option value={120}>120s</option>
-            </select>
+          {currentStep === 'route' ? (
+            <div className="flex items-center space-x-2 shrink-0">
+              <button
+                type="button"
+                onClick={restartQuickPreview}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-colors"
+                title="Restart Route Preview"
+              >
+                <RotateCcw className="w-4 h-4" />
+              </button>
+              <div
+                className="flex items-center space-x-1 bg-slate-800/80 p-0.5 rounded-lg border border-slate-700/60"
+                role="radiogroup"
+                aria-label="Route Preview Speed"
+              >
+                {(['slow', 'normal', 'fast'] as const).map((spd) => {
+                  const isSelected = quickPreviewSpeed === spd;
+                  return (
+                    <button
+                      key={spd}
+                      type="button"
+                      role="radio"
+                      aria-checked={isSelected}
+                      onClick={() => setQuickPreviewSpeed(spd)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-teal-500 text-slate-950 shadow-sm'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {spd === 'slow' ? 'Slow' : spd === 'normal' ? 'Normal' : 'Fast'}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center space-x-2 shrink-0">
+              <select
+                value={duration}
+                onChange={(e) => updateActiveScene({ duration: Number(e.target.value) })}
+                className="text-xs font-semibold text-[var(--text)] px-2 py-1 bg-[var(--panel-2)] rounded-md border border-[var(--border)] min-h-[32px]"
+                title="Scene animation duration"
+              >
+                <option value={5}>5s</option>
+                <option value={10}>10s</option>
+                <option value={15}>15s</option>
+                <option value={20}>20s</option>
+                <option value={30}>30s</option>
+                <option value={45}>45s</option>
+                <option value={60}>60s</option>
+                <option value={120}>120s</option>
+              </select>
 
-            <button
-              type="button"
-              onClick={() =>
-                setPlaybackSpeed((s) => (s === 1 ? 2 : s === 2 ? 0.5 : 1))
-              }
-              className="speed-dial text-xs font-semibold text-[var(--muted)] hover:text-[var(--text)] px-3 py-1 bg-[var(--panel-2)] rounded-md border border-[var(--border)] transition-colors min-h-[32px]"
-              title="Click to cycle preview speed (0.5x / 1.0x / 2.0x)"
-            >
-              {playbackSpeed.toFixed(1)}x Speed
-            </button>
-          </div>
+              <button
+                type="button"
+                onClick={() =>
+                  setPlaybackSpeed((s) => (s === 1 ? 2 : s === 2 ? 0.5 : 1))
+                }
+                className="speed-dial text-xs font-semibold text-[var(--muted)] hover:text-[var(--text)] px-3 py-1 bg-[var(--panel-2)] rounded-md border border-[var(--border)] transition-colors min-h-[32px]"
+                title="Click to cycle preview speed (0.5x / 1.0x / 2.0x)"
+              >
+                {playbackSpeed.toFixed(1)}x Speed
+              </button>
+            </div>
+          )}
         </footer>
       )}
 

@@ -29,9 +29,6 @@ import {
   MapPin,
   Navigation,
   Loader2,
-  Play,
-  Pause,
-  RotateCcw,
   AlertTriangle,
 } from 'lucide-react';
 
@@ -110,17 +107,17 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
   onImportGPX,
   onPreviewDestination,
   onNext,
-  quickPreviewState = 'idle',
-  quickPreviewProgress = 0,
+  quickPreviewState: _quickPreviewState = 'idle',
+  quickPreviewProgress: _quickPreviewProgress = 0,
   quickPreviewSpeed = 'normal',
-  onStartQuickPreview,
-  onPauseQuickPreview,
-  onResumeQuickPreview,
-  onRestartQuickPreview,
-  onStopQuickPreview,
+  onStartQuickPreview: _onStartQuickPreview,
+  onPauseQuickPreview: _onPauseQuickPreview,
+  onResumeQuickPreview: _onResumeQuickPreview,
+  onRestartQuickPreview: _onRestartQuickPreview,
+  onStopQuickPreview: _onStopQuickPreview,
   onSetQuickPreviewSpeed,
-  onSeekQuickPreview,
-  remainingDistanceKm,
+  onSeekQuickPreview: _onSeekQuickPreview,
+  remainingDistanceKm: _remainingDistanceKm,
 }) => {
   const activeRoute = routes.find((r) => r.id === activeRouteId) || routes[0];
   const [importWaypoints, setImportWaypoints] = useState(true);
@@ -798,12 +795,12 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-2">
           <button
             type="button"
             disabled={isBuildingRoute}
             onClick={handleCreateJourney}
-            className="py-3 px-3 rounded-xl bg-teal-500 hover:bg-teal-400 disabled:opacity-50 text-slate-950 font-extrabold text-xs shadow-lg shadow-teal-500/20 transition-all flex items-center justify-center space-x-1.5 cursor-pointer"
+            className="w-full py-3 px-4 rounded-xl bg-teal-500 hover:bg-teal-400 disabled:opacity-50 text-slate-950 font-extrabold text-sm shadow-lg shadow-teal-500/20 transition-all flex items-center justify-center space-x-2 cursor-pointer"
           >
             {isBuildingRoute ? (
               <>
@@ -818,138 +815,18 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
             )}
           </button>
 
-          <button
-            type="button"
-            data-testid="preview-route-btn"
-            disabled={
-              isBuildingRoute ||
-              canonicalRoute?.status !== 'calculated' ||
-              !activeRoute ||
-              activeRoute.points.length < 2
-            }
-            onClick={() => {
-              if (quickPreviewState === 'playing') {
-                onPauseQuickPreview?.();
-              } else if (quickPreviewState === 'paused') {
-                onResumeQuickPreview?.();
-              } else if (quickPreviewState === 'finished') {
-                onRestartQuickPreview?.();
-              } else {
-                onStartQuickPreview?.();
-              }
-            }}
-            className="py-3 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:hover:bg-slate-800 text-teal-300 border border-teal-500/30 font-bold text-xs transition-all flex items-center justify-center space-x-1.5 cursor-pointer"
-          >
-            {quickPreviewState === 'playing' ? (
-              <>
-                <Pause className="w-4 h-4" />
-                <span>Pause</span>
-              </>
-            ) : quickPreviewState === 'paused' ? (
-              <>
-                <Play className="w-4 h-4" />
-                <span>Resume</span>
-              </>
-            ) : (
-              <>
-                <Play className="w-4 h-4" />
-                <span>Preview</span>
-              </>
-            )}
-          </button>
-        </div>
-
-        {quickPreviewState !== 'idle' && (
-          <div
-            data-testid="quick-preview-toolbar"
-            className="p-3.5 rounded-xl bg-slate-900 border border-teal-500/40 shadow-xl space-y-3"
-          >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2">
-                <span className="w-2 h-2 rounded-full bg-teal-400 animate-pulse" />
-                <span className="font-extrabold text-xs text-slate-200 uppercase tracking-wider">
-                  Quick Route Preview
-                </span>
-              </div>
-              <button
-                type="button"
-                data-testid="exit-preview-btn"
-                onClick={onStopQuickPreview}
-                className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-slate-300 hover:text-white border border-slate-700 transition-colors cursor-pointer"
-              >
-                Exit Preview
-              </button>
-            </div>
-
-            {/* Scrubber progress slider */}
-            <div className="space-y-1">
-              <div className="flex justify-between text-[11px] text-slate-400 font-mono">
-                <span>{Math.round((quickPreviewProgress || 0) * 100)}%</span>
-                <span>{remainingDistanceKm !== undefined ? `${remainingDistanceKm.toFixed(1)} km left` : ''}</span>
-              </div>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.001}
-                value={quickPreviewProgress || 0}
-                onChange={(e) => onSeekQuickPreview?.(parseFloat(e.target.value))}
-                className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-teal-400"
-              />
-            </div>
-
-            {/* Playback & Speed Controls */}
-            <div className="flex items-center justify-between pt-1">
-              <div className="flex items-center space-x-1.5">
-                {quickPreviewState === 'playing' ? (
-                  <button
-                    type="button"
-                    data-testid="preview-pause-btn"
-                    onClick={onPauseQuickPreview}
-                    className="p-2 rounded-lg bg-teal-500 text-slate-950 font-bold hover:bg-teal-400 transition-colors cursor-pointer"
-                    title="Pause"
-                  >
-                    <Pause className="w-4 h-4" />
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    data-testid="preview-play-btn"
-                    onClick={() => {
-                      if (quickPreviewState === 'finished') {
-                        onRestartQuickPreview?.();
-                      } else if (quickPreviewState === 'paused') {
-                        onResumeQuickPreview?.();
-                      } else {
-                        onStartQuickPreview?.();
-                      }
-                    }}
-                    className="p-2 rounded-lg bg-teal-500 text-slate-950 font-bold hover:bg-teal-400 transition-colors cursor-pointer"
-                    title={quickPreviewState === 'finished' ? 'Restart' : 'Play'}
-                  >
-                    <Play className="w-4 h-4" />
-                  </button>
-                )}
-                <button
-                  type="button"
-                  data-testid="preview-restart-btn"
-                  onClick={onRestartQuickPreview}
-                  className="p-2 rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white transition-colors cursor-pointer"
-                  title="Restart from beginning"
-                >
-                  <RotateCcw className="w-4 h-4" />
-                </button>
-              </div>
-
-              {/* Speed chips */}
+          {/* Speed chips accessible in Route tab */}
+          {canonicalRoute?.status === 'calculated' && activeRoute && activeRoute.points.length >= 2 && (
+            <div className="flex items-center justify-between p-2 rounded-xl bg-slate-900 border border-slate-800">
+              <span className="text-[11px] font-semibold text-slate-300">Preview Speed</span>
               <div
-                className="flex items-center space-x-1 bg-slate-800/80 p-1 rounded-lg border border-slate-700/60"
+                className="flex items-center space-x-1 bg-slate-800/80 p-0.5 rounded-lg border border-slate-700/60"
                 role="radiogroup"
                 aria-label="Playback Speed"
               >
                 {(['slow', 'normal', 'fast'] as const).map((spd) => {
                   const isSelected = (quickPreviewSpeed || 'normal') === spd;
-                  const label = spd === 'slow' ? 'Slow' : spd === 'normal' ? 'Normal' : 'Fast';
+                  const label = spd === 'slow' ? 'Slow (30)' : spd === 'normal' ? 'Normal (60)' : 'Fast (120)';
                   return (
                     <button
                       key={spd}
@@ -970,8 +847,8 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
                 })}
               </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
         {canonicalRoute?.status === 'calculated' && activeRoute && activeRoute.points.length >= 2 && (
           <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-teal-500/10 border border-teal-500/30 text-teal-300 text-[11px]">

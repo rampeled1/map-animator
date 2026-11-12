@@ -110,8 +110,8 @@ export const CameraEditorPanel: React.FC<CameraEditorPanelProps> = ({
               onSetCameraPreset('fly_along');
               onSetCameraMode('follow');
               onSetFollowOrient('heading');
-              onSetTilt(55);
-              onSetFollowZoom(15);
+              onSetTilt(50);
+              onSetFollowZoom(12);
             }}
             className={`flex flex-col items-center justify-center p-3.5 rounded-xl border text-center transition-all duration-200 cursor-pointer ${
               cameraPreset === 'fly_along'

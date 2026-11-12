@@ -33,6 +33,7 @@ interface MapViewerProps {
   currentStep?: StepId;
   activeRouteId?: string;
   signs?: MapSign[];
+  totalRouteDistanceKm?: number;
   cameraBlock?: CameraBlock;
   cameraBlocks?: CameraBlock[];
   currentTime?: number;
@@ -414,6 +415,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   size = 1080,
   routes,
   signs,
+  totalRouteDistanceKm,
   currentStep = 'route',
   currentTime,
   duration,
@@ -704,8 +706,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     }
   }, [routes, currentTime, duration, isQuickPreviewActive, quickPreviewProgress]);
 
-  // Quick Preview camera lock and one-time fitBounds
-  const prevQuickPreviewActiveRef = useRef(false);
+  // Quick Preview camera lock (interaction lock while preview is active)
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -717,19 +718,6 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       map.keyboard.disable();
       map.doubleClickZoom.disable();
       map.touchZoomRotate.disable();
-
-      if (!prevQuickPreviewActiveRef.current && routes[0]?.points?.length >= 2) {
-        const bounds = computeRouteBounds(routes[0].points);
-        if (bounds) {
-          map.fitBounds(
-            [
-              [bounds.minLng, bounds.minLat],
-              [bounds.maxLng, bounds.maxLat],
-            ],
-            { padding: 80, duration: 800 }
-          );
-        }
-      }
     } else {
       map.dragPan.enable();
       map.scrollZoom.enable();
@@ -739,28 +727,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       map.doubleClickZoom.enable();
       map.touchZoomRotate.enable();
     }
-    prevQuickPreviewActiveRef.current = !!isQuickPreviewActive;
-  }, [isQuickPreviewActive, routes]);
-
-  // Sync camera tilt (pitch) and bearing immediately when adjusted in the Camera step
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-    map.easeTo({
-      pitch: tilt,
-      bearing: followOrient === 'north' ? rotateOffset : map.getBearing(),
-      duration: 200,
-    });
-  }, [tilt, rotateOffset, followOrient]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || currentStep !== 'camera' || cameraMode !== 'follow') return;
-    map.easeTo({
-      zoom: followZoom,
-      duration: 200,
-    });
-  }, [followZoom, currentStep, cameraMode]);
+  }, [isQuickPreviewActive]);
 
   // Dynamically build and apply the exact map style JSON whenever theme or map options change
   useEffect(() => {
@@ -1563,6 +1530,18 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                 // While editing in the Signs step and not playing, show all signs so user can see/drag them
                 if (currentStep === 'signs' && !isPlaying) return true;
                 if (sign.triggerMode === 'always' || mainPts.length === 0) return true;
+
+                // Dedicated B11 distance-based photo positioning:
+                // When sign has routeDistanceKm, compare against traveled distance along route
+                // and keep photo visible until playback completes (end of video)
+                if (sign.routeDistanceKm !== undefined && (totalRouteDistanceKm || 0) > 0) {
+                  const effectiveProgress =
+                    isQuickPreviewActive && quickPreviewProgress !== undefined
+                      ? quickPreviewProgress
+                      : progressRatio;
+                  const traveledKm = effectiveProgress * (totalRouteDistanceKm || 0);
+                  return traveledKm >= sign.routeDistanceKm;
+                }
 
                 // Find nearest point index on main route
                 let closestIdx = 0;

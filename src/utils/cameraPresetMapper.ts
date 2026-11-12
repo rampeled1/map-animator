@@ -61,8 +61,8 @@ export function mapPresetToCameraBlocks(
           kind: 'follow',
           followOrient: 'heading', // direction_of_travel
           center: centerPoint,
-          pitch: settings?.pitch ?? 55,
-          zoom: settings?.zoom ?? 15,
+          pitch: settings?.pitch ?? 50,
+          zoom: settings?.zoom ?? 12,
           bearing: settings?.bearing ?? 0,
           easing: 'smooth',
         },

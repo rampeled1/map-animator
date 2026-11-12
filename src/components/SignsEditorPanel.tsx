@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { MapSign } from '../types';
 import { extractExifGps } from '../utils/exifReader';
+import { CatmullRom3DPath } from '../utils/catmullRom3DPath';
 import {
   MapPin,
   Image as ImageIcon,
@@ -20,6 +21,8 @@ interface SignsEditorPanelProps {
   signs: MapSign[];
   routePoints?: { lng: number; lat: number }[];
   defaultCenter?: [number, number];
+  totalRouteDistanceKm?: number;
+  pathEngine?: CatmullRom3DPath | null;
   onAddSign: (sign: MapSign) => void;
   onUpdateSign: (sign: MapSign) => void;
   onDeleteSign: (id: string) => void;
@@ -41,6 +44,8 @@ export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
   signs,
   routePoints,
   defaultCenter = [12.4964, 41.9028],
+  totalRouteDistanceKm = 0,
+  pathEngine,
   onAddSign,
   onUpdateSign,
   onDeleteSign,
@@ -64,22 +69,63 @@ export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
     return [defaultCenter[0] + jitter, defaultCenter[1] + jitter];
   };
 
+  const updatePhotoDistance = (sign: MapSign, dKm: number) => {
+    const maxDist = totalRouteDistanceKm || 0;
+    const clampedDist = Math.max(0, Math.min(maxDist, dKm));
+    if (pathEngine && maxDist > 0) {
+      const pGeo = clampedDist / maxDist;
+      const u = pathEngine.getSplineParameterAtDistanceProgress(pGeo);
+      const sample = pathEngine.sample(u);
+      if (sample) {
+        onUpdateSign({
+          ...sign,
+          lng: sample.worldPoint[0],
+          lat: sample.worldPoint[1],
+          routeDistanceKm: clampedDist,
+        });
+        return;
+      }
+    }
+    onUpdateSign({
+      ...sign,
+      routeDistanceKm: clampedDist,
+    });
+  };
+
   const processPhotoFile = async (file: File) => {
     // Check for EXIF GPS tags
     const gps = await extractExifGps(file);
     const photoUrl = await readFileAsDataUrl(file);
     const fallback = getFallbackLocation();
 
+    let initialDistKm = 0;
+    let initialLng = fallback[0];
+    let initialLat = fallback[1];
+
+    if (!gps && pathEngine && totalRouteDistanceKm > 0) {
+      initialDistKm = 0;
+      const u = pathEngine.getSplineParameterAtDistanceProgress(0);
+      const sample = pathEngine.sample(u);
+      if (sample) {
+        initialLng = sample.worldPoint[0];
+        initialLat = sample.worldPoint[1];
+      }
+    } else if (gps) {
+      initialLng = gps.lng;
+      initialLat = gps.lat;
+    }
+
     const newSign: MapSign = {
       id: `sign-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      lng: gps ? gps.lng : fallback[0],
-      lat: gps ? gps.lat : fallback[1],
+      lng: initialLng,
+      lat: initialLat,
       text: file.name.replace(/\.[^/.]+$/, ''),
       style: 'photo',
       photoUrl,
       triggerMode: 'onPassed',
       pauseSec: 2,
       size: 1,
+      routeDistanceKm: !gps && totalRouteDistanceKm > 0 ? initialDistKm : undefined,
     };
 
     onAddSign(newSign);
@@ -301,6 +347,45 @@ export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
               </div>
+
+              {/* Photo Distance Slider (B11) */}
+              {sign.style === 'photo' && (totalRouteDistanceKm || 0) > 0 && (
+                <div className="space-y-1.5 p-2 rounded-lg bg-slate-900 border border-slate-800">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <div className="flex items-center space-x-1.5">
+                      {sign.photoUrl && (
+                        <img
+                          src={sign.photoUrl}
+                          alt={sign.text}
+                          className="w-5 h-5 rounded object-cover border border-slate-700 shrink-0"
+                        />
+                      )}
+                      <span className="text-slate-300 font-semibold">Route Distance</span>
+                    </div>
+                    <span className="font-mono text-teal-400 font-bold">
+                      {(sign.routeDistanceKm ?? 0).toFixed(1)} km
+                      <span className="text-slate-500 font-normal text-[10px]"> / {(totalRouteDistanceKm || 0).toFixed(1)} km</span>
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={Math.max(0.1, totalRouteDistanceKm || 0)}
+                    step={0.1}
+                    value={Math.min(totalRouteDistanceKm || 0, sign.routeDistanceKm ?? 0)}
+                    onChange={(e) => {
+                      const d = parseFloat(e.target.value);
+                      updatePhotoDistance(sign, d);
+                    }}
+                    className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-teal-400"
+                    aria-label={`Photo route distance for ${sign.text}`}
+                  />
+                  <div className="flex justify-between text-[9px] text-slate-500 font-mono">
+                    <span>0 km</span>
+                    <span>{(totalRouteDistanceKm || 0).toFixed(1)} km</span>
+                  </div>
+                </div>
+              )}
 
               {/* Visibility Trigger Mode */}
               <div className="space-y-1">
