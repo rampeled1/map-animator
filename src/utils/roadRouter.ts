@@ -356,19 +356,33 @@ function appendPointDeduplicated(target: RoutePoint[], pt: RoutePoint) {
 }
 
 /**
- * Builds a complete multi-stop route automatically based on selected transport mode.
+ * Result structure containing both the full concatenated route geometry
+ * and isolated per-segment geometries for multi-stop journeys.
+ */
+export interface JourneyCalculationResult {
+  points: RoutePoint[];
+  segmentGeometries: RoutePoint[][];
+}
+
+/**
+ * Builds a complete multi-stop route automatically based on selected transport mode,
+ * returning both the complete journey points and isolated per-segment geometries.
  * Follow Roads (OSRM) applies exclusively to: 'car', 'walking', 'bike'.
  * Free Mode (Direct / Arc Geometry) applies to: 'train', 'boat', 'plane'.
  */
-export async function buildJourneyFromStops(
+export async function buildJourneyWithSegments(
   stops: { lng: number; lat: number }[],
   transportMode: string | string[] = 'car'
-): Promise<RoutePoint[]> {
-  if (stops.length === 0) return [];
-  if (stops.length === 1) return [{ lng: stops[0].lng, lat: stops[0].lat }];
+): Promise<JourneyCalculationResult> {
+  if (stops.length === 0) return { points: [], segmentGeometries: [] };
+  if (stops.length === 1) {
+    const single = [{ lng: stops[0].lng, lat: stops[0].lat }];
+    return { points: single, segmentGeometries: [] };
+  }
 
   const allPoints: RoutePoint[] = [];
   appendPointDeduplicated(allPoints, { lng: stops[0].lng, lat: stops[0].lat });
+  const segmentGeometries: RoutePoint[][] = [];
 
   for (let i = 0; i < stops.length - 1; i++) {
     const start = stops[i];
@@ -382,18 +396,17 @@ export async function buildJourneyFromStops(
     let legPoints: RoutePoint[] = [];
 
     if (isPlane) {
-      // Free Mode (Flight Arc): 3D parabolic curve with altitude apex
+      // Free Mode (Flight Arc): Direct geographic connection with 3D parabolic elevation apex
+      // Note: Artificial 12% lateral perpendicular offset removed per B16 requirement C
       const steps = 80;
       const dLng = end.lng - start.lng;
       const dLat = end.lat - start.lat;
-      const perpLng = -dLat * 0.12;
-      const perpLat = dLng * 0.12;
       for (let s = 1; s <= steps; s++) {
         const t = s / steps;
         const arc = Math.sin(t * Math.PI);
         legPoints.push({
-          lng: start.lng + dLng * t + perpLng * arc,
-          lat: start.lat + dLat * t + perpLat * arc,
+          lng: start.lng + dLng * t,
+          lat: start.lat + dLat * t,
           ele: Math.round(arc * 8500),
         });
       }
@@ -430,14 +443,32 @@ export async function buildJourneyFromStops(
       legPoints = await getRoadRoute(start, end, profile, 0.1, false);
     }
 
+    // Build isolated segment geometry for segment i
+    const segPts: RoutePoint[] = [{ lng: start.lng, lat: start.lat, ele: isPlane ? 0 : (start as any).ele || 0 }];
     for (const pt of legPoints) {
       appendPointDeduplicated(allPoints, pt);
+      appendPointDeduplicated(segPts, pt);
     }
+    // Ensure segment cleanly terminates at end stop
+    appendPointDeduplicated(segPts, { lng: end.lng, lat: end.lat, ele: isPlane ? 0 : (end as any).ele || 0 });
+    segmentGeometries.push(segPts);
   }
 
   // Ensure destination coordinate is always preserved exactly at the end
   const destStop = stops[stops.length - 1];
-  appendPointDeduplicated(allPoints, { lng: destStop.lng, lat: destStop.lat });
+  appendPointDeduplicated(allPoints, { lng: destStop.lng, lat: destStop.lat, ele: 0 });
 
-  return allPoints;
+  return { points: allPoints, segmentGeometries };
+}
+
+/**
+ * Builds a complete multi-stop route automatically based on selected transport mode.
+ * Preserves backwards compatibility for callers expecting Promise<RoutePoint[]>.
+ */
+export async function buildJourneyFromStops(
+  stops: { lng: number; lat: number }[],
+  transportMode: string | string[] = 'car'
+): Promise<RoutePoint[]> {
+  const result = await buildJourneyWithSegments(stops, transportMode);
+  return result.points;
 }

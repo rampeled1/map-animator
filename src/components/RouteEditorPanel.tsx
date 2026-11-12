@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Route, RouteLeg, UIMode, DestinationPreview, CanonicalRoute, RouteStop, RouteSegment, CanonicalTransportType, RouteCalculationStatus, RoutePoint, QuickPreviewSpeed, QuickPreviewState } from '../types';
+import { Route, RouteLeg, UIMode, DestinationPreview, CanonicalRoute, RouteStop, RouteSegment, CanonicalTransportType, RouteCalculationStatus, QuickPreviewSpeed, QuickPreviewState } from '../types';
 import {
   SnapProfile,
   PlaceSuggestion,
   searchPlaceSuggestions,
-  buildJourneyFromStops,
+  buildJourneyWithSegments,
+  JourneyCalculationResult,
 } from '../utils/roadRouter';
 import { ElevationProfileChart } from './ElevationProfileChart';
 import { calculateTrackStats } from '../utils/gpxParser';
@@ -188,7 +189,9 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
 
   const handleSelectTransport = (tId: CanonicalTransportType, snap: SnapProfile, targetSegmentIndex?: number) => {
     onSetSnapProfile(snap);
-    onUpdateRoute({ ...activeRoute, transportType: tId as any });
+    // Requirement D: When switching between road-following and free transport modes,
+    // mark incompatible calculated geometry as stale. Do not prematurely mutate activeRoute
+    // to present old road-following geometry as the newly selected Air route.
     if (canonicalRoute && onUpdateCanonicalRoute) {
       const segIdx = targetSegmentIndex !== undefined ? targetSegmentIndex : selectedSegmentIndex;
       const currentSegments = canonicalRoute.segments || [];
@@ -373,22 +376,33 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
         segmentTransports.push(existingSeg?.transportType || (activeRoute.transportType as CanonicalTransportType) || 'car');
       }
 
-      let journeyPoints: RoutePoint[] = [];
+      let journeyResult: JourneyCalculationResult | null = null;
       let calculationSucceeded = false;
       try {
-        journeyPoints = await buildJourneyFromStops(resolvedCoords, segmentTransports);
-        calculationSucceeded = Array.isArray(journeyPoints) && journeyPoints.length >= 2;
+        journeyResult = await buildJourneyWithSegments(resolvedCoords, segmentTransports);
+        calculationSucceeded = Array.isArray(journeyResult.points) && journeyResult.points.length >= 2;
       } catch {
         calculationSucceeded = false;
       }
 
-      // Approved Staged Calculation Policy:
+      // Approved Staged Calculation Policy (Requirement D):
       // - On success: commit new geometry and set status 'calculated'
-      // - On failure: discard incomplete staged result, preserve previous successful geometry, and mark status 'stale'
-      const previousGeometry = canonicalRoute?.calculatedGeometry || activeRoute.points || [];
-      const finalGeometry = calculationSucceeded ? journeyPoints : previousGeometry;
-      const calculationStatus: RouteCalculationStatus = calculationSucceeded ? 'calculated' : 'stale';
+      // - On failure: discard incomplete staged result, preserve previous successful geometry for atomic rollback,
+      //   mark status 'stale', and ensure failed calculations do not overwrite segments with corrupt or incompatible geometry.
+      if (!calculationSucceeded || !journeyResult) {
+        setIsBuildingRoute(false);
+        if (canonicalRoute && onUpdateCanonicalRoute) {
+          onUpdateCanonicalRoute({
+            ...canonicalRoute,
+            status: 'stale',
+          }, true);
+        }
+        alert('Could not calculate route. Previous valid route preserved.');
+        return;
+      }
 
+      const finalGeometry = journeyResult.points;
+      const calculationStatus: RouteCalculationStatus = 'calculated';
       const stats = calculateTrackStats(finalGeometry);
       const journeyName = `${resolvedCoords[0].name} → ${resolvedCoords[resolvedCoords.length - 1].name}`;
 
@@ -402,9 +416,11 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
         lat: c.lat,
       }));
 
+      // Requirement B: Each canonical segment contains only its own geometry, not the entire journey geometry!
       const canonicalSegments: RouteSegment[] = [];
       for (let i = 0; i < canonicalStops.length - 1; i++) {
         const segTransport = segmentTransports[i];
+        const segGeometry = journeyResult.segmentGeometries[i] || [];
         canonicalSegments.push({
           id: canonicalRoute?.segments?.[i]?.id || `seg-${Date.now()}-${i}`,
           fromStopId: canonicalStops[i].id,
@@ -414,7 +430,7 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
           shapingPoints: [],
           use3dSymbol: true,
           status: calculationStatus,
-          geometry: finalGeometry,
+          geometry: segGeometry,
         });
       }
 
@@ -433,9 +449,11 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
         }, true);
       }
 
+      const primaryTransport = segmentTransports[0] || 'car';
       const updatedRoute: Route = {
         ...activeRoute,
         name: journeyName,
+        transportType: primaryTransport as any,
         points: finalGeometry,
         stats,
       };

@@ -32,7 +32,18 @@ export function getAdaptedCanonicalRoute(canonical?: CanonicalRoute): Route {
   // Build points array from calculatedGeometry (or synthesize from segments if geometry empty)
   let points: RoutePoint[] = canonical.calculatedGeometry || [];
   if (points.length === 0 && canonical.segments.length > 0) {
-    points = canonical.segments.flatMap((s) => s.geometry || []);
+    const rawPoints = canonical.segments.flatMap((s) => s.geometry || []);
+    points = [];
+    for (const pt of rawPoints) {
+      if (points.length === 0) {
+        points.push(pt);
+      } else {
+        const last = points[points.length - 1];
+        if (Math.abs(last.lng - pt.lng) > 1e-7 || Math.abs(last.lat - pt.lat) > 1e-7) {
+          points.push(pt);
+        }
+      }
+    }
   }
 
   // Synthesize legacy legs for 3D model rendering at segment boundaries
@@ -41,18 +52,38 @@ export function getAdaptedCanonicalRoute(canonical?: CanonicalRoute): Route {
 
   for (let i = 0; i < canonical.segments.length; i++) {
     const seg = canonical.segments[i];
+    let segTransport = seg.transportType;
+    // Requirement D: If segment status is stale and geometry is incompatible (e.g. road geometry under Air mode),
+    // do not present the old road-following geometry as the newly selected Air route.
+    if (seg.status === 'stale') {
+      const isAir = ['plane', 'sportsplane', 'floatplane', 'fighter', 'bomber', 'helicopter', 'drone', 'balloon', 'sailplane', 'paramotor', 'hangglider', 'paraglider'].includes(segTransport);
+      const segPoints = seg.geometry && seg.geometry.length > 0 ? seg.geometry : points;
+      const hasAirEle = segPoints.some((p) => (p.ele || 0) > 0);
+      if (isAir && !hasAirEle && segPoints.length > 2) {
+        segTransport = 'car';
+      }
+    }
+
     legs.push({
       id: seg.id,
       fromPointIndex: pointOffset,
-      transportType: seg.transportType as any,
+      transportType: segTransport as any,
       use3dSymbol: seg.use3dSymbol ?? true,
       color: seg.color || canonical.color,
       lineStyle: seg.lineStyle || canonical.style,
     });
-    pointOffset += (seg.geometry || []).length;
+    const segLen = (seg.geometry || []).length;
+    pointOffset += Math.max(0, segLen > 1 ? segLen - 1 : segLen);
   }
 
-  const primaryTransport = canonical.segments[0]?.transportType || 'car';
+  let primaryTransport = canonical.segments[0]?.transportType || 'car';
+  if (canonical.status === 'stale' || canonical.segments[0]?.status === 'stale') {
+    const isAir = ['plane', 'sportsplane', 'floatplane', 'fighter', 'bomber', 'helicopter', 'drone', 'balloon', 'sailplane', 'paramotor', 'hangglider', 'paraglider'].includes(primaryTransport);
+    const hasAirEle = points.some((p) => (p.ele || 0) > 0);
+    if (isAir && !hasAirEle && points.length > 2) {
+      primaryTransport = 'car';
+    }
+  }
 
   return {
     id: canonical.id,

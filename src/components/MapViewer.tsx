@@ -1531,6 +1531,24 @@ export const MapViewer: React.FC<MapViewerProps> = ({
             const activeTransport = activeLeg ? activeLeg.transportType : route.transportType;
             const activeColor = activeLeg?.color || route.color || '#ff4d2e';
 
+            // Requirement A: Prevent flat 2D SVG ground route and elevated 3D Air ribbon from being displayed
+            // simultaneously when they represent the same Air route during playback.
+            // Preserves 2D route representation during editing, and preserves Car, Walking, Bike, Train, and Boat.
+            const currentTransportStr = activeTransport || route.transportType || '';
+            const isAirTransportMode = [
+              'plane', 'sportsplane', 'floatplane', 'fighter', 'bomber',
+              'helicopter', 'drone', 'balloon', 'sailplane', 'paramotor',
+              'hangglider', 'paraglider'
+            ].includes(currentTransportStr);
+            const hasFlightElevation = currentPoints.some((p) => (p.ele || 0) > 0);
+            const isAirMode = isAirTransportMode || hasFlightElevation;
+            const isPlaybackActive = Boolean(
+              isPlaying ||
+              isQuickPreviewActive ||
+              (currentTime !== undefined && currentTime > 0 && currentStep !== 'route')
+            );
+            const shouldHideSvgLine = Boolean(route.hideLine || (isAirMode && isPlaybackActive));
+
             const projected: [number, number][] = [];
             let lastPx = -9999;
             let lastPy = -9999;
@@ -1582,8 +1600,8 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
             return (
               <g key={route.id}>
-                {/* Draw Route Line unless hideLine is enabled (Oct 8 changelog) */}
-                {d && !route.hideLine && (
+                {/* Draw Route Line unless hideLine is enabled or Air mode during playback (Requirement A) */}
+                {d && !shouldHideSvgLine && (
                   <>
                     <path
                       d={d}
@@ -1621,7 +1639,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
                   strokeWidth={Math.max(2, strokeW * 0.45)}
                 />
                 {/* Animated Vehicle / Symbol at Tip with SymbolScale & Multi-Leg transport */}
-                {tipPos && (
+                {tipPos && !shouldHideSvgLine && (
                   <g transform={`translate(${tipPos[0]}, ${tipPos[1]}) rotate(${headAngle})`}>
                     {renderVehicleShape(
                       activeTransport,
