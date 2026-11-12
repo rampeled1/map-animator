@@ -20,6 +20,14 @@ function mapTransportTo3DModel(transport?: TransportType): ModelKind3D {
   return 'car';
 }
 
+/**
+ * Calculates the shortest signed angular difference between target and current degrees.
+ * Guaranteed in range [-180, +180]. Prevents 360° spinning across 0°/360° or 180°/-180°.
+ */
+function shortestAngularDiff(targetDeg: number, currentDeg: number): number {
+  return ((((targetDeg - currentDeg + 540) % 360) + 360) % 360) - 180;
+}
+
 interface MapViewerProps {
   themeId: string;
   mapLabels?: boolean;
@@ -479,6 +487,8 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   const overlaysRef = useRef(overlays);
   overlaysRef.current = overlays;
   const lastWholeTourKeyRef = useRef<string>('');
+  const followBearingRef = useRef<number | null>(null);
+  const lastFollowProgressRef = useRef<number>(0);
   const onCancelInteractionRef = useRef(onCancelInteraction);
   onCancelInteractionRef.current = onCancelInteraction;
   const currentStepRef = useRef<StepId>(currentStep);
@@ -822,6 +832,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     const pts = routes[0].points;
 
     if (effectiveMode === 'still') {
+      followBearingRef.current = null;
       if (cameraPreset === 'whole_tour' && pts.length > 0) {
         const tourKey = `${pts.length}-${pts[0]?.lng.toFixed(4)}-${pts[pts.length - 1]?.lng.toFixed(4)}`;
         if (lastWholeTourKeyRef.current !== tourKey) {
@@ -865,26 +876,39 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       ? [kinematics.worldPoint[0], kinematics.worldPoint[1]]
       : [snakeSample.tipPoint.lng, snakeSample.tipPoint.lat];
 
-    const travelBearing = kinematics ? kinematics.headingDeg : snakeSample.headingDeg;
+    const rawHeading = kinematics ? kinematics.headingDeg : snakeSample.headingDeg;
+    const normHeading = ((rawHeading % 360) + 360) % 360;
 
     if (effectiveMode === 'follow') {
-      let bearing = effectiveRotate;
-      if (effectiveFollowOrient === 'heading') {
-        bearing = travelBearing + effectiveRotate;
+      const targetBearing =
+        effectiveFollowOrient === 'heading'
+          ? ((normHeading + effectiveRotate) % 360 + 360) % 360
+          : ((effectiveRotate % 360) + 360) % 360;
+
+      const progressJump = Math.abs(progress - lastFollowProgressRef.current);
+      lastFollowProgressRef.current = progress;
+
+      let bearing: number;
+      if (followBearingRef.current === null || !isPlaying || progressJump > 0.05) {
+        // Immediate orientation lock on preset change, pause, seek, or restart
+        bearing = targetBearing;
+        followBearingRef.current = targetBearing;
+      } else {
+        // Continuous shortest-signed-angular-difference filter during playback
+        // Eliminates 360° spins across North/South and smooths curve transitions
+        const diff = shortestAngularDiff(targetBearing, followBearingRef.current);
+        const alpha = 0.20; // Smooth gradual turning
+        const unclampedStep = alpha * diff;
+        // Cap maximum rotational angular speed to prevent whipping on extreme 180° hairpins
+        const maxAngularSpeed = 6.0;
+        const step = Math.max(-maxAngularSpeed, Math.min(maxAngularSpeed, unclampedStep));
+        const next = followBearingRef.current + step;
+        bearing = ((next % 360) + 360) % 360;
+        followBearingRef.current = bearing;
       }
 
-      // Smooth look-ahead along direction of travel
-      let centerPos: [number, number] = vehicleLngLat;
-      if (lookAhead && lookAhead > 0) {
-        const lookT = Math.min(1, progress + lookAhead * 0.05);
-        const lookKine = threeMapLayerRef.current?.getKinematics(lookT);
-        if (lookKine) {
-          centerPos = [
-            vehicleLngLat[0] + (lookKine.worldPoint[0] - vehicleLngLat[0]) * 0.6,
-            vehicleLngLat[1] + (lookKine.worldPoint[1] - vehicleLngLat[1]) * 0.6,
-          ];
-        }
-      }
+      // Lock center strictly to vehicle position to prevent viewport drift or pendulum swings
+      const centerPos: [number, number] = vehicleLngLat;
 
       if (isPlaying) {
         map.jumpTo({
@@ -902,7 +926,11 @@ export const MapViewer: React.FC<MapViewerProps> = ({
           duration: 100,
         });
       }
-    } else if (effectiveMode === 'tripod') {
+    } else {
+      followBearingRef.current = null;
+    }
+
+    if (effectiveMode === 'tripod') {
       // Tripod stands in one spot and turns to watch the vehicle go by
       const standOrigin: [number, number] = activeBlock
         ? activeBlock.center
