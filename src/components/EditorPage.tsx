@@ -461,7 +461,12 @@ export const EditorPage: React.FC<EditorPageProps> = ({
           else if (quickPreviewState === 'finished') restartQuickPreview();
           else startQuickPreview();
         } else {
-          setIsPlaying((p) => !p);
+          if (currentTime >= duration) {
+            setCurrentTime(0);
+            setIsPlaying(true);
+          } else {
+            setIsPlaying((p) => !p);
+          }
         }
       } else if (e.key === 'n' || e.key === 'N') {
         e.preventDefault();
@@ -508,7 +513,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
             return 0;
           }
           setIsPlaying(false);
-          return 0;
+          return duration;
         }
         return next;
       });
@@ -1963,7 +1968,14 @@ export const EditorPage: React.FC<EditorPageProps> = ({
               <div className="h-10 px-2.5 bg-[#16191e] border-t border-slate-800 flex items-center gap-2 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setIsPlaying(!isPlaying)}
+                  onClick={() => {
+                    if (currentTime >= duration) {
+                      setCurrentTime(0);
+                      setIsPlaying(true);
+                    } else {
+                      setIsPlaying(!isPlaying);
+                    }
+                  }}
                   aria-label={isPlaying ? 'Pause' : 'Play'}
                   className="w-7 h-7 rounded-full bg-[var(--accent)] text-[var(--accent-ink)] flex items-center justify-center shrink-0"
                 >
@@ -2183,7 +2195,12 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                   startQuickPreview();
                 }
               } else {
-                setIsPlaying(!isPlaying);
+                if (currentTime >= duration) {
+                  setCurrentTime(0);
+                  setIsPlaying(true);
+                } else {
+                  setIsPlaying(!isPlaying);
+                }
               }
             }}
             className="w-9 h-9 rounded-full bg-[var(--accent)] hover:bg-[#ff6930] text-[var(--accent-ink)] flex items-center justify-center shadow-md transition-transform active:scale-95 shrink-0"

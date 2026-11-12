@@ -482,6 +482,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   overlaysRef.current = overlays;
   const lastWholeTourKeyRef = useRef<string>('');
   const followBearingRef = useRef<number | null>(null);
+  const followCenterRef = useRef<[number, number] | null>(null);
   const lastFollowProgressRef = useRef<number>(0);
   const lastFollowTimeRef = useRef<number | null>(null);
   const isProgrammaticCameraChangeRef = useRef<boolean>(false);
@@ -611,6 +612,8 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
     let rafId = 0;
     const triggerSync = () => {
+      // Prevent redundant React re-renders during active playback (playback is already driven by currentTime)
+      if (isPlayingRef.current) return;
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = 0;
@@ -850,10 +853,16 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
     const pts = routes[0].points;
 
+    // Reset Whole Tour cache when leaving Whole Tour so returning triggers fitBounds immediately
+    if (cameraPreset !== 'whole_tour') {
+      lastWholeTourKeyRef.current = '';
+    }
+
     if (effectiveMode === 'still') {
       followBearingRef.current = null;
+      followCenterRef.current = null;
       if (cameraPreset === 'whole_tour' && pts.length > 0) {
-        const tourKey = `${pts.length}-${pts[0]?.lng.toFixed(4)}-${pts[pts.length - 1]?.lng.toFixed(4)}`;
+        const tourKey = `${pts.length}-${pts[0]?.lat.toFixed(4)},${pts[0]?.lng.toFixed(4)}-${pts[pts.length - 1]?.lat.toFixed(4)},${pts[pts.length - 1]?.lng.toFixed(4)}`;
         if (lastWholeTourKeyRef.current !== tourKey) {
           lastWholeTourKeyRef.current = tourKey;
           const bounds = computeRouteBounds(pts);
@@ -946,8 +955,23 @@ export const MapViewer: React.FC<MapViewerProps> = ({
         followBearingRef.current = bearing;
       }
 
-      // Lock center strictly to vehicle position to prevent viewport drift or pendulum swings
-      const centerPos: [number, number] = vehicleLngLat;
+      // Frame-rate-independent camera center interpolation (lambda = 15 s^-1)
+      let centerPos: [number, number];
+      if (followCenterRef.current === null || !isPlaying || progressJump > 0.05) {
+        // Immediate position lock on preset change, pause, seek, or restart
+        followCenterRef.current = [vehicleLngLat[0], vehicleLngLat[1]];
+        centerPos = vehicleLngLat;
+      } else {
+        // Continuous time-based exponential decay damping
+        // Lambda = 15.0 s^-1 gives responsive tracking (~0.15s settling time, max lag < 1.5m @ 60 km/h)
+        const lambdaCenter = 15.0;
+        const decayFactor = 1 - Math.exp(-lambdaCenter * dtSec);
+        const prevCenter = followCenterRef.current;
+        const nextLng = prevCenter[0] + (vehicleLngLat[0] - prevCenter[0]) * decayFactor;
+        const nextLat = prevCenter[1] + (vehicleLngLat[1] - prevCenter[1]) * decayFactor;
+        followCenterRef.current = [nextLng, nextLat];
+        centerPos = followCenterRef.current;
+      }
 
       isProgrammaticCameraChangeRef.current = true;
       try {
@@ -972,6 +996,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       }
     } else {
       followBearingRef.current = null;
+      followCenterRef.current = null;
     }
 
     if (effectiveMode === 'tripod') {
@@ -1506,10 +1531,25 @@ export const MapViewer: React.FC<MapViewerProps> = ({
             const activeTransport = activeLeg ? activeLeg.transportType : route.transportType;
             const activeColor = activeLeg?.color || route.color || '#ff4d2e';
 
-            const projected = currentPoints.map((pt) => {
-              const p = map.project([pt.lng, pt.lat]);
-              return [p.x, p.y] as [number, number];
-            });
+            const projected: [number, number][] = [];
+            let lastPx = -9999;
+            let lastPy = -9999;
+            for (let i = 0; i < currentPoints.length; i++) {
+              const pt = currentPoints[i];
+              if (i === 0 || i === currentPoints.length - 1) {
+                const p = map.project([pt.lng, pt.lat]);
+                projected.push([p.x, p.y]);
+                lastPx = p.x;
+                lastPy = p.y;
+              } else {
+                const p = map.project([pt.lng, pt.lat]);
+                if (Math.abs(p.x - lastPx) >= 1.5 || Math.abs(p.y - lastPy) >= 1.5) {
+                  projected.push([p.x, p.y]);
+                  lastPx = p.x;
+                  lastPy = p.y;
+                }
+              }
+            }
             const strokeW = Math.max(
               3,
               ((route.width !== undefined && route.width <= 4) ? route.width : 3.5) * scale
