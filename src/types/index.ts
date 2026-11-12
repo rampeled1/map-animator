@@ -77,6 +77,25 @@ export const QUICK_PREVIEW_SPEED_MULTIPLIERS: Record<QuickPreviewSpeed, number> 
   fast: 2.0,   // 120 km/h
 };
 
+export const QUICK_PREVIEW_MIN_DURATION_SEC = 10;
+export const QUICK_PREVIEW_MAX_DURATION_SEC = 120;
+export const QUICK_PREVIEW_REF_DISTANCE_KM = 60;
+export const QUICK_PREVIEW_REF_NORMAL_DURATION_SEC = 30;
+
+/**
+ * Computes the hybrid duration in seconds for Quick Route Preview.
+ * Duration scales proportionally with geographic route distance.
+ * Calibration: 60 km route at Normal (60 km/h equivalent) = 30 seconds.
+ * Clamped between 10 seconds and 120 seconds.
+ */
+export function computeQuickPreviewDurationSeconds(distanceKm: number, speed: QuickPreviewSpeed): number {
+  if (distanceKm <= 0) return 0;
+  const speedMultiplier = QUICK_PREVIEW_SPEED_MULTIPLIERS[speed] || 1.0;
+  const effectiveSpeedKmh = QUICK_PREVIEW_BASE_SPEED_KMH * speedMultiplier;
+  const rawDurationSeconds = (distanceKm / QUICK_PREVIEW_REF_DISTANCE_KM) * (QUICK_PREVIEW_BASE_SPEED_KMH / effectiveSpeedKmh) * QUICK_PREVIEW_REF_NORMAL_DURATION_SEC;
+  return Math.min(QUICK_PREVIEW_MAX_DURATION_SEC, Math.max(QUICK_PREVIEW_MIN_DURATION_SEC, rawDurationSeconds));
+}
+
 export interface QuickPreviewConfig {
   state: QuickPreviewState;
   speed: QuickPreviewSpeed;

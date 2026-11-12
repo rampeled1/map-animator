@@ -17,8 +17,7 @@ import {
   Scene,
   QuickPreviewSpeed,
   QuickPreviewState,
-  QUICK_PREVIEW_BASE_SPEED_KMH,
-  QUICK_PREVIEW_SPEED_MULTIPLIERS,
+  computeQuickPreviewDurationSeconds,
 } from '../types';
 import { CatmullRom3DPath } from '../utils/catmullRom3DPath';
 import { getAdaptedCanonicalRoute } from '../utils/routeAdapter';
@@ -297,7 +296,9 @@ export const EditorPage: React.FC<EditorPageProps> = ({
 
   // Single consistent distance-normalized progress model derived from CatmullRom3DPath
   const previewPathEngine = useMemo(() => {
-    const pts = canonicalRoute?.calculatedGeometry || projectRoutes[0]?.points || [];
+    const pts = (canonicalRoute?.calculatedGeometry && canonicalRoute.calculatedGeometry.length > 0)
+      ? canonicalRoute.calculatedGeometry
+      : (projectRoutes[0]?.points || []);
     return new CatmullRom3DPath(pts);
   }, [canonicalRoute?.calculatedGeometry, projectRoutes]);
 
@@ -366,7 +367,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
     setQuickPreviewProgress(clamped);
   };
 
-  // Quick Preview Animation Loop: constant geographic distance per second
+  // Quick Preview Animation Loop: constant geographic distance per second via approved hybrid duration model
   useEffect(() => {
     if (quickPreviewState !== 'playing') {
       if (previewRafRef.current !== null) {
@@ -376,9 +377,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
       return;
     }
 
-    const speedMultiplier = QUICK_PREVIEW_SPEED_MULTIPLIERS[quickPreviewSpeed] || 1.0;
-    const speedKmh = QUICK_PREVIEW_BASE_SPEED_KMH * speedMultiplier;
-    const durationSec = totalPreviewDistanceKm > 0 ? (totalPreviewDistanceKm * 3600) / speedKmh : 0;
+    const durationSec = computeQuickPreviewDurationSeconds(totalPreviewDistanceKm, quickPreviewSpeed);
 
     if (durationSec <= 0) {
       setQuickPreviewState('finished');

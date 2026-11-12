@@ -5,6 +5,7 @@ import { createNewProject } from './src/utils/indexedDbStorage.ts';
 import {
   QUICK_PREVIEW_BASE_SPEED_KMH,
   QUICK_PREVIEW_SPEED_MULTIPLIERS,
+  computeQuickPreviewDurationSeconds,
 } from './src/types/index.ts';
 import type {
   CanonicalRoute,
@@ -205,16 +206,16 @@ function measureSplinePathDistanceKm(
   return accumulatedKm;
 }
 
-function testPhysicalSpeedAlongPath(
+function testHybridSpeedAlongPath(
   pathEngine: CatmullRom3DPath,
   speedName: QuickPreviewSpeed,
   pStart: number,
-  intervalSec: number = 10
+  intervalSec: number = 2
 ) {
   const totalKm = pathEngine.getTotalDistanceKm();
   const speedMultiplier = QUICK_PREVIEW_SPEED_MULTIPLIERS[speedName];
   const speedKmh = QUICK_PREVIEW_BASE_SPEED_KMH * speedMultiplier;
-  const durationSec = (totalKm * 3600) / speedKmh;
+  const durationSec = computeQuickPreviewDurationSeconds(totalKm, speedName);
 
   const deltaProgress = intervalSec / durationSec;
   const pEnd = Math.min(1.0, pStart + deltaProgress);
@@ -224,34 +225,34 @@ function testPhysicalSpeedAlongPath(
 
   // Measure actual curved spline path length between uStart and uEnd
   const actualTravelledKm = measureSplinePathDistanceKm(pathEngine, uStart, uEnd, 500);
-  const expectedTravelledKm = (speedKmh * intervalSec) / 3600;
+  const expectedTravelledKm = (deltaProgress) * totalKm;
 
   const diffMeters = Math.abs(actualTravelledKm - expectedTravelledKm) * 1000;
-  return { expectedTravelledKm, actualTravelledKm, diffMeters, speedKmh };
+  return { expectedTravelledKm, actualTravelledKm, diffMeters, speedKmh, durationSec };
 }
 
-// 2.1 Test physical speed on straight section at Slow, Normal, Fast
+// 2.1 Test hybrid speed on straight section at Slow, Normal, Fast
 const straightEngine = new CatmullRom3DPath(straightSectionRoute);
 for (const speed of ['slow', 'normal', 'fast'] as const) {
-  const res = testPhysicalSpeedAlongPath(straightEngine, speed, 0.2, 10);
+  const res = testHybridSpeedAlongPath(straightEngine, speed, 0.2, 2);
   assert(res.diffMeters < 1.5, `Straight speed ${speed} error ${res.diffMeters.toFixed(3)} m should be < 1.5 m`);
-  pass(`Straight path @ ${speed} (${res.speedKmh} km/h, 10s): expected ${(res.expectedTravelledKm * 1000).toFixed(2)} m, measured ${(res.actualTravelledKm * 1000).toFixed(2)} m (diff ${res.diffMeters.toFixed(3)} m)`);
+  pass(`Straight path @ ${speed} (equiv ${res.speedKmh} km/h, dur ${res.durationSec.toFixed(1)}s, 2s step): expected ${(res.expectedTravelledKm * 1000).toFixed(2)} m, measured ${(res.actualTravelledKm * 1000).toFixed(2)} m (diff ${res.diffMeters.toFixed(3)} m)`);
 }
 
-// 2.2 Test physical speed through Alpine hairpin curves at Slow, Normal, Fast
+// 2.2 Test hybrid speed through Alpine hairpin curves at Slow, Normal, Fast
 const alpineEngine = new CatmullRom3DPath(alpineHairpinRoute);
 for (const speed of ['slow', 'normal', 'fast'] as const) {
-  const res = testPhysicalSpeedAlongPath(alpineEngine, speed, 0.35, 10);
+  const res = testHybridSpeedAlongPath(alpineEngine, speed, 0.35, 2);
   assert(res.diffMeters < 1.5, `Alpine hairpin speed ${speed} error ${res.diffMeters.toFixed(3)} m should be < 1.5 m`);
-  pass(`Alpine hairpin @ ${speed} (${res.speedKmh} km/h, 10s): expected ${(res.expectedTravelledKm * 1000).toFixed(2)} m, measured ${(res.actualTravelledKm * 1000).toFixed(2)} m (diff ${res.diffMeters.toFixed(3)} m)`);
+  pass(`Alpine hairpin @ ${speed} (equiv ${res.speedKmh} km/h, dur ${res.durationSec.toFixed(1)}s, 2s step): expected ${(res.expectedTravelledKm * 1000).toFixed(2)} m, measured ${(res.actualTravelledKm * 1000).toFixed(2)} m (diff ${res.diffMeters.toFixed(3)} m)`);
 }
 
-// 2.3 Test physical speed on Transcontinental high-latitude section
+// 2.3 Test hybrid speed on Transcontinental high-latitude section
 const transEngine = new CatmullRom3DPath(transcontinentalRoute);
 for (const speed of ['slow', 'normal', 'fast'] as const) {
-  const res = testPhysicalSpeedAlongPath(transEngine, speed, 0.45, 10);
+  const res = testHybridSpeedAlongPath(transEngine, speed, 0.45, 2);
   assert(res.diffMeters < 1.5, `Transcontinental speed ${speed} error ${res.diffMeters.toFixed(3)} m should be < 1.5 m`);
-  pass(`Transcontinental @ ${speed} (${res.speedKmh} km/h, 10s): expected ${(res.expectedTravelledKm * 1000).toFixed(2)} m, measured ${(res.actualTravelledKm * 1000).toFixed(2)} m (diff ${res.diffMeters.toFixed(3)} m)`);
+  pass(`Transcontinental @ ${speed} (equiv ${res.speedKmh} km/h, dur ${res.durationSec.toFixed(1)}s, 2s step): expected ${(res.expectedTravelledKm * 1000).toFixed(2)} m, measured ${(res.actualTravelledKm * 1000).toFixed(2)} m (diff ${res.diffMeters.toFixed(3)} m)`);
 }
 
 // -------------------------------------------------------------------------------------------------
