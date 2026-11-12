@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import maplibregl from 'maplibre-gl';
-import type { RoutePoint } from '../types';
-import { CatmullRom3DPath, PathSample3D } from './catmullRom3DPath';
-import { Vehicle3DManager, ModelKind3D } from './vehicle3DManager';
+import type { RoutePoint } from '../types/index.ts';
+import { CatmullRom3DPath, type PathSample3D } from './catmullRom3DPath.ts';
+import { Vehicle3DManager, type ModelKind3D } from './vehicle3DManager.ts';
 
 export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
   public id: string = 'three-vehicle-layer';
@@ -22,6 +22,8 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
   private ribbonOuterMesh: THREE.Mesh | null = null;
   private ribbonInnerMesh: THREE.Mesh | null = null;
   private tipTargetMesh: THREE.Mesh | null = null;
+  private static readonly MAX_RIBBON_STEPS = 250;
+  private ribbonIndexBuffer: THREE.BufferAttribute | null = null;
 
   private currentProgress: number = 0;
   private currentSplineU: number = 0;
@@ -29,6 +31,15 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
   private modelKind: ModelKind3D = 'tank';
   private customModelFile?: File;
   private isModelLoading: boolean = false;
+  private modelLoadRequestId: number = 0;
+  private loadedModelKind: ModelKind3D | null = null;
+  private loadedColorHex: string | null = null;
+  private loadedCustomFile?: File;
+
+  // Route geometry fingerprint cache to skip redundant CatmullRom3DPath rebuilds
+  private lastRoutePointsRef: RoutePoint[] | null = null;
+  private lastRouteFingerprint: string = '';
+  private hasRouteElevation: boolean = false;
 
   constructor(options?: {
     modelKind?: ModelKind3D;
@@ -66,9 +77,40 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
     this.loadVehicleModel();
   }
 
+  private getSharedRibbonIndexBuffer(): THREE.BufferAttribute {
+    if (!this.ribbonIndexBuffer) {
+      const maxSteps = ThreeMapLayer.MAX_RIBBON_STEPS;
+      const indices = new Uint16Array((maxSteps - 1) * 6);
+      let offset = 0;
+      for (let i = 0; i < maxSteps - 1; i++) {
+        const v0 = i * 2;
+        const v1 = i * 2 + 1;
+        const v2 = (i + 1) * 2;
+        const v3 = (i + 1) * 2 + 1;
+        indices[offset++] = v0;
+        indices[offset++] = v1;
+        indices[offset++] = v2;
+        indices[offset++] = v2;
+        indices[offset++] = v1;
+        indices[offset++] = v3;
+      }
+      this.ribbonIndexBuffer = new THREE.BufferAttribute(indices, 1);
+    }
+    return this.ribbonIndexBuffer;
+  }
+
   private initRibbonMeshes() {
+    const maxVertices = ThreeMapLayer.MAX_RIBBON_STEPS * 2;
+    const sharedIndex = this.getSharedRibbonIndexBuffer();
+
     // Outer border ribbon (dark contrast casing)
     const outerGeo = new THREE.BufferGeometry();
+    const outerPosAttr = new THREE.BufferAttribute(new Float32Array(maxVertices * 3), 3);
+    outerPosAttr.setUsage(THREE.DynamicDrawUsage);
+    outerGeo.setAttribute('position', outerPosAttr);
+    outerGeo.setIndex(sharedIndex);
+    outerGeo.setDrawRange(0, 0);
+
     const outerMat = new THREE.MeshBasicMaterial({
       color: 0x11161d,
       side: THREE.DoubleSide,
@@ -78,10 +120,17 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
       opacity: 0.85,
     });
     this.ribbonOuterMesh = new THREE.Mesh(outerGeo, outerMat);
+    this.ribbonOuterMesh.frustumCulled = false;
     this.scene.add(this.ribbonOuterMesh);
 
     // Inner core ribbon (semi-translucent vibrant overlay)
     const innerGeo = new THREE.BufferGeometry();
+    const innerPosAttr = new THREE.BufferAttribute(new Float32Array(maxVertices * 3), 3);
+    innerPosAttr.setUsage(THREE.DynamicDrawUsage);
+    innerGeo.setAttribute('position', innerPosAttr);
+    innerGeo.setIndex(sharedIndex);
+    innerGeo.setDrawRange(0, 0);
+
     const innerMat = new THREE.MeshBasicMaterial({
       color: new THREE.Color(this.routeColorHex),
       side: THREE.DoubleSide,
@@ -91,6 +140,7 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
       opacity: 0.75,
     });
     this.ribbonInnerMesh = new THREE.Mesh(innerGeo, innerMat);
+    this.ribbonInnerMesh.frustumCulled = false;
     this.scene.add(this.ribbonInnerMesh);
   }
 
@@ -108,27 +158,97 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
     this.scene.add(this.tipTargetMesh);
   }
 
-  private async loadVehicleModel() {
-    if (this.isModelLoading) return;
-    this.isModelLoading = true;
-    try {
-      if (this.vehicleGroup) {
-        this.scene.remove(this.vehicleGroup);
+  private disposeObject3D(root: THREE.Object3D | null) {
+    if (!root) return;
+    root.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (mesh.isMesh) {
+        if (mesh.geometry) {
+          mesh.geometry.dispose();
+        }
+        if (mesh.material) {
+          if (Array.isArray(mesh.material)) {
+            mesh.material.forEach((m) => m.dispose());
+          } else {
+            mesh.material.dispose();
+          }
+        }
       }
-      const model = await this.vehicleManager.loadModel(
-        this.modelKind,
-        this.routeColorHex,
-        this.customModelFile
-      );
-      this.vehicleGroup = model;
-      this.scene.add(this.vehicleGroup);
-    } catch (err) {
-      console.warn('ThreeMapLayer: Failed to load 3D vehicle, using fallback procedural tank', err);
-      this.vehicleGroup = this.vehicleManager.createProceduralModel('tank', this.routeColorHex);
-      this.scene.add(this.vehicleGroup);
-    } finally {
-      this.isModelLoading = false;
+    });
+  }
+
+  private async loadVehicleModel() {
+    const reqKind = this.modelKind;
+    const reqColor = this.routeColorHex;
+    const reqFile = this.customModelFile;
+
+    // Skip if already loaded with the exact same configuration
+    if (
+      !this.isModelLoading &&
+      this.vehicleGroup !== null &&
+      this.loadedModelKind === reqKind &&
+      this.loadedColorHex === reqColor &&
+      this.loadedCustomFile === reqFile
+    ) {
+      return;
     }
+
+    const requestId = ++this.modelLoadRequestId;
+    this.isModelLoading = true;
+
+    try {
+      const model = await this.vehicleManager.loadModel(reqKind, reqColor, reqFile);
+      // Stale request check: a newer load request was issued while awaiting
+      if (requestId !== this.modelLoadRequestId) {
+        this.disposeObject3D(model);
+        return;
+      }
+
+      const oldGroup = this.vehicleGroup;
+      if (oldGroup) {
+        this.scene.remove(oldGroup);
+        this.disposeObject3D(oldGroup);
+      }
+
+      this.vehicleGroup = model;
+      this.loadedModelKind = reqKind;
+      this.loadedColorHex = reqColor;
+      this.loadedCustomFile = reqFile;
+      this.scene.add(this.vehicleGroup);
+      this.map?.triggerRepaint();
+    } catch (err) {
+      if (requestId !== this.modelLoadRequestId) {
+        return;
+      }
+      console.warn('ThreeMapLayer: Failed to load 3D vehicle, using fallback procedural tank', err);
+      const fallbackModel = this.vehicleManager.createProceduralModel('tank', reqColor);
+      const oldGroup = this.vehicleGroup;
+      if (oldGroup) {
+        this.scene.remove(oldGroup);
+        this.disposeObject3D(oldGroup);
+      }
+      this.vehicleGroup = fallbackModel;
+      this.loadedModelKind = 'tank';
+      this.loadedColorHex = reqColor;
+      this.loadedCustomFile = undefined;
+      this.scene.add(this.vehicleGroup);
+      this.map?.triggerRepaint();
+    } finally {
+      if (requestId === this.modelLoadRequestId) {
+        this.isModelLoading = false;
+      }
+    }
+  }
+
+  private computeRouteFingerprint(points: RoutePoint[]): string {
+    const len = points.length;
+    if (len === 0) return '0';
+    const first = points[0];
+    const q1 = points[len >> 2];
+    const mid = points[len >> 1];
+    const q3 = points[(len * 3) >> 2];
+    const last = points[len - 1];
+    return `${len}:${first.lng},${first.lat},${first.ele || 0}|${q1.lng},${q1.lat},${q1.ele || 0}|${mid.lng},${mid.lat},${mid.ele || 0}|${q3.lng},${q3.lat},${q3.ele || 0}|${last.lng},${last.lat},${last.ele || 0}`;
   }
 
   public setRoute(points: RoutePoint[], colorHex?: string) {
@@ -139,11 +259,47 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
       }
       this.loadVehicleModel();
     }
+
+    const nextFingerprint = this.computeRouteFingerprint(points);
+    if (this.lastRoutePointsRef === points && this.lastRouteFingerprint === nextFingerprint) {
+      return;
+    }
+    // Even if the array reference is new (e.g., adapted route), skip spline rebuild if fingerprint & all points match
+    if (
+      this.lastRouteFingerprint === nextFingerprint &&
+      this.lastRoutePointsRef !== null &&
+      this.lastRoutePointsRef.length === points.length
+    ) {
+      let identical = true;
+      for (let i = 0; i < points.length; i++) {
+        const a = this.lastRoutePointsRef[i];
+        const b = points[i];
+        if (a.lng !== b.lng || a.lat !== b.lat || (a.ele || 0) !== (b.ele || 0)) {
+          identical = false;
+          break;
+        }
+      }
+      if (identical) {
+        this.lastRoutePointsRef = points;
+        return;
+      }
+    }
+
+    this.lastRoutePointsRef = points;
+    this.lastRouteFingerprint = nextFingerprint;
+    this.hasRouteElevation = points.some((p) => (p.ele || 0) > 0);
     this.pathEngine.updatePoints(points);
     this.currentSplineU = this.pathEngine.getSplineParameterAtDistanceProgress(this.currentProgress);
   }
 
   public setModelKind(kind: ModelKind3D, customFile?: File) {
+    if (
+      this.modelKind === kind &&
+      this.customModelFile === customFile &&
+      (this.vehicleGroup !== null || this.isModelLoading)
+    ) {
+      return;
+    }
     this.modelKind = kind;
     this.customModelFile = customFile;
     this.loadVehicleModel();
@@ -192,7 +348,7 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
     if (!this.map || !this.renderer) return;
 
     // Synchronize Three.js camera projection matrix with MapLibre's modelViewProjectionMatrix
-    this.camera.projectionMatrix = new THREE.Matrix4().fromArray(options.modelViewProjectionMatrix);
+    this.camera.projectionMatrix.fromArray(options.modelViewProjectionMatrix);
 
     const sample = this.pathEngine.sample(this.currentSplineU);
 
@@ -222,21 +378,30 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
         this.tipTargetMesh.scale.set(ringScale, ringScale, ringScale);
       }
 
-      // Update 3D Ribbon Trail
-      // Half width ~ 3.5 meters
-      const ribbonHalfWidth = mercatorScale * 3.5;
-      const ribbonData = this.pathEngine.generateRibbonGeometry(
-        this.currentSplineU,
-        ribbonHalfWidth,
-        250
-      );
+      // Update 3D Ribbon Trail ONLY for Air transport modes or elevated 3D routes.
+      // Ground routes are already rendered by the crisp 2D SVG route overlay.
+      const isAirOrElevatedRoute =
+        this.hasRouteElevation || this.modelKind === 'fighter' || this.modelKind === 'drone';
 
-      if (ribbonData.count >= 2 && this.ribbonOuterMesh && this.ribbonInnerMesh) {
-        this.ribbonOuterMesh.visible = true;
-        this.ribbonInnerMesh.visible = true;
+      if (isAirOrElevatedRoute && this.ribbonOuterMesh && this.ribbonInnerMesh) {
+        // Half width ~ 3.5 meters
+        const ribbonHalfWidth = mercatorScale * 3.5;
+        const ribbonData = this.pathEngine.generateRibbonGeometry(
+          this.currentSplineU,
+          ribbonHalfWidth,
+          ThreeMapLayer.MAX_RIBBON_STEPS
+        );
 
-        this.updateRibbonGeometry(this.ribbonOuterMesh, ribbonData.outerPositions, ribbonData.count);
-        this.updateRibbonGeometry(this.ribbonInnerMesh, ribbonData.innerPositions, ribbonData.count);
+        if (ribbonData.count >= 2) {
+          this.ribbonOuterMesh.visible = true;
+          this.ribbonInnerMesh.visible = true;
+
+          this.updateRibbonGeometry(this.ribbonOuterMesh, ribbonData.outerPositions, ribbonData.count);
+          this.updateRibbonGeometry(this.ribbonInnerMesh, ribbonData.innerPositions, ribbonData.count);
+        } else {
+          this.ribbonOuterMesh.visible = false;
+          this.ribbonInnerMesh.visible = false;
+        }
       } else {
         if (this.ribbonOuterMesh) this.ribbonOuterMesh.visible = false;
         if (this.ribbonInnerMesh) this.ribbonInnerMesh.visible = false;
@@ -257,24 +422,34 @@ export class ThreeMapLayer implements maplibregl.CustomLayerInterface {
 
   private updateRibbonGeometry(mesh: THREE.Mesh, positions: Float32Array, count: number) {
     const geo = mesh.geometry;
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    let posAttr = geo.getAttribute('position') as THREE.BufferAttribute | undefined;
+    const requiredFloats = count * 2 * 3;
 
-    // Construct index buffer for triangle strip
-    // Quad between step i and i+1: (v0, v1, v2) and (v2, v1, v3)
-    const indices: number[] = [];
-    for (let i = 0; i < count - 1; i++) {
-      const v0 = i * 2;
-      const v1 = i * 2 + 1;
-      const v2 = (i + 1) * 2;
-      const v3 = (i + 1) * 2 + 1;
-      indices.push(v0, v1, v2);
-      indices.push(v2, v1, v3);
+    if (!posAttr || (posAttr.array as Float32Array).length < requiredFloats) {
+      const capacity = Math.max(requiredFloats, ThreeMapLayer.MAX_RIBBON_STEPS * 2 * 3);
+      posAttr = new THREE.BufferAttribute(new Float32Array(capacity), 3);
+      posAttr.setUsage(THREE.DynamicDrawUsage);
+      geo.setAttribute('position', posAttr);
     }
-    geo.setIndex(indices);
-    geo.computeVertexNormals();
+
+    (posAttr.array as Float32Array).set(positions.subarray(0, requiredFloats), 0);
+    posAttr.needsUpdate = true;
+
+    if (!geo.index) {
+      geo.setIndex(this.getSharedRibbonIndexBuffer());
+    }
+    geo.setDrawRange(0, Math.max(0, (count - 1) * 6));
   }
 
   public onRemove() {
+    this.disposeObject3D(this.vehicleGroup);
+    this.vehicleGroup = null;
+    this.disposeObject3D(this.ribbonOuterMesh);
+    this.ribbonOuterMesh = null;
+    this.disposeObject3D(this.ribbonInnerMesh);
+    this.ribbonInnerMesh = null;
+    this.disposeObject3D(this.tipTargetMesh);
+    this.tipTargetMesh = null;
     if (this.renderer) {
       this.renderer.dispose();
       this.renderer = null;

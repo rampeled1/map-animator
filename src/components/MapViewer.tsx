@@ -5,7 +5,7 @@ import { buildMapStyle } from '../utils/mapStyleBuilder';
 import { calculateTrackStats } from '../utils/gpxParser';
 import { ThreeMapLayer } from '../utils/threeMapLayer';
 import { ModelKind3D } from '../utils/vehicle3DManager';
-import { getSmoothSnakePath } from '../utils/snakePathInterpolation';
+import { getSmoothSnakePath, type SnakePathSample } from '../utils/snakePathInterpolation';
 import { computeRouteBounds, shortestAngularDiff } from '../utils/cameraPresetMapper';
 import { WaypointOptionsModal } from './WaypointOptionsModal';
 
@@ -532,6 +532,15 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
   const svgStartDotRef = useRef<SVGCircleElement | null>(null);
   const svgTipGroupRef = useRef<SVGGElement | null>(null);
 
+  // Cached per-frame snake path and SVG projection to avoid duplicate computation during 30 Hz React commits
+  const lastPlaybackProjectionRef = useRef<{
+    routeId: string;
+    progress: number;
+    snakeSample: SnakePathSample;
+    proj: OptionARouteProjection;
+    shouldHideSvgLine: boolean;
+  } | null>(null);
+
   const cameraBlocksRef = useRef(cameraBlocks);
   cameraBlocksRef.current = cameraBlocks;
   const cameraPresetRef = useRef(cameraPreset);
@@ -618,6 +627,8 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
         activeBlock?.orbitDirection ?? orbitDirectionRef.current ?? 'clockwise';
 
       const pts = routesRef.current[0].points;
+      const snakeSample = getSmoothSnakePath(pts, progress);
+      if (!snakeSample) return;
 
       if (cameraPresetRef.current !== 'whole_tour') {
         lastWholeTourKeyRef.current = '';
@@ -670,9 +681,6 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
           }
         }
       } else {
-        const snakeSample = getSmoothSnakePath(pts, progress);
-        if (!snakeSample) return;
-
         const kinematics = threeMapLayerRef.current?.getKinematics(progress);
         const vehicleLngLat: [number, number] = kinematics
           ? [kinematics.worldPoint[0], kinematics.worldPoint[1]]
@@ -795,62 +803,73 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
         }
       }
 
-      // Synchronize SVG Route Projection with the newly applied camera transform
-      const snakeSample = getSmoothSnakePath(pts, progress);
-      if (snakeSample) {
-        const activeRoute = routesRef.current[0];
-        const isAirTransportMode = [
-          'plane',
-          'sportsplane',
-          'floatplane',
-          'fighter',
-          'bomber',
-          'helicopter',
-          'drone',
-          'balloon',
-          'sailplane',
-          'paramotor',
-          'hangglider',
-          'paraglider',
-        ].includes(activeRoute?.transportType || '');
-        const hasFlightElevation = snakeSample.drawnPoints.some((p) => (p.ele || 0) > 0);
-        const isAirMode = isAirTransportMode || hasFlightElevation;
-        const shouldHideSvgLine = Boolean(activeRoute?.hideLine || (isAirMode && isPlaybackActive));
+      // Synchronize SVG Route Projection with the newly applied camera transform (reusing snakeSample)
+      const activeRoute = routesRef.current[0];
+      const isAirTransportMode = [
+        'plane',
+        'sportsplane',
+        'floatplane',
+        'fighter',
+        'bomber',
+        'helicopter',
+        'drone',
+        'balloon',
+        'sailplane',
+        'paramotor',
+        'hangglider',
+        'paraglider',
+      ].includes(activeRoute?.transportType || '');
+      const hasFlightElevation = snakeSample.drawnPoints.some((p) => (p.ele || 0) > 0);
+      const isAirMode = isAirTransportMode || hasFlightElevation;
+      const shouldHideSvgLine = Boolean(activeRoute?.hideLine || (isAirMode && isPlaybackActive));
 
-        if (!shouldHideSvgLine) {
-          const proj = computeOptionARouteProjection(
-            map,
-            snakeSample.drawnPoints,
-            snakeSample.headingDeg
-          );
-          if (svgPathWhiteRef.current) svgPathWhiteRef.current.setAttribute('d', proj.d);
-          if (svgPathColorRef.current) svgPathColorRef.current.setAttribute('d', proj.d);
-          if (svgStartDotRef.current) {
-            if (proj.startDotPos) {
-              svgStartDotRef.current.setAttribute('cx', proj.startDotPos[0].toFixed(1));
-              svgStartDotRef.current.setAttribute('cy', proj.startDotPos[1].toFixed(1));
-              svgStartDotRef.current.style.display = '';
-            } else {
-              svgStartDotRef.current.style.display = 'none';
-            }
+      if (!shouldHideSvgLine) {
+        const proj = computeOptionARouteProjection(
+          map,
+          snakeSample.drawnPoints,
+          snakeSample.headingDeg
+        );
+        lastPlaybackProjectionRef.current = {
+          routeId: activeRoute.id,
+          progress,
+          snakeSample,
+          proj,
+          shouldHideSvgLine: false,
+        };
+        if (svgPathWhiteRef.current) svgPathWhiteRef.current.setAttribute('d', proj.d);
+        if (svgPathColorRef.current) svgPathColorRef.current.setAttribute('d', proj.d);
+        if (svgStartDotRef.current) {
+          if (proj.startDotPos) {
+            svgStartDotRef.current.setAttribute('cx', proj.startDotPos[0].toFixed(1));
+            svgStartDotRef.current.setAttribute('cy', proj.startDotPos[1].toFixed(1));
+            svgStartDotRef.current.style.display = '';
+          } else {
+            svgStartDotRef.current.style.display = 'none';
           }
-          if (svgTipGroupRef.current) {
-            if (proj.tipPos) {
-              svgTipGroupRef.current.setAttribute(
-                'transform',
-                `translate(${proj.tipPos[0].toFixed(1)}, ${proj.tipPos[1].toFixed(1)}) rotate(${proj.headAngle.toFixed(1)})`
-              );
-              svgTipGroupRef.current.style.display = '';
-            } else {
-              svgTipGroupRef.current.style.display = 'none';
-            }
-          }
-        } else {
-          if (svgPathWhiteRef.current) svgPathWhiteRef.current.setAttribute('d', '');
-          if (svgPathColorRef.current) svgPathColorRef.current.setAttribute('d', '');
-          if (svgStartDotRef.current) svgStartDotRef.current.style.display = 'none';
-          if (svgTipGroupRef.current) svgTipGroupRef.current.style.display = 'none';
         }
+        if (svgTipGroupRef.current) {
+          if (proj.tipPos) {
+            svgTipGroupRef.current.setAttribute(
+              'transform',
+              `translate(${proj.tipPos[0].toFixed(1)}, ${proj.tipPos[1].toFixed(1)}) rotate(${proj.headAngle.toFixed(1)})`
+            );
+            svgTipGroupRef.current.style.display = '';
+          } else {
+            svgTipGroupRef.current.style.display = 'none';
+          }
+        }
+      } else {
+        lastPlaybackProjectionRef.current = {
+          routeId: activeRoute.id,
+          progress,
+          snakeSample,
+          proj: { d: '', startDotPos: null, tipPos: null, headAngle: 0 },
+          shouldHideSvgLine: true,
+        };
+        if (svgPathWhiteRef.current) svgPathWhiteRef.current.setAttribute('d', '');
+        if (svgPathColorRef.current) svgPathColorRef.current.setAttribute('d', '');
+        if (svgStartDotRef.current) svgStartDotRef.current.style.display = 'none';
+        if (svgTipGroupRef.current) svgTipGroupRef.current.style.display = 'none';
       }
     },
   }));
@@ -1170,10 +1189,18 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
     });
   }, [destinationPreview]);
 
-  // Camera tracking during animation playback & scrubbing (follow, still, tripod, orbit, + cameraBlocks)
+  // Camera tracking during idle, paused, preset changes & scrubbing (follow, still, tripod, orbit, + cameraBlocks)
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !routes[0]?.points?.length) return;
+
+    // Correction A: During active continuous playback (Timeline or Quick Route Preview),
+    // updatePlaybackFrame() is the single authoritative writer for camera state, vehicle kinematics,
+    // and SVG route projection. Disable this passive React effect while active playback is running.
+    if (isPlaying || (isQuickPreviewActive && (isQuickPreviewPlaying ?? true))) {
+      return;
+    }
+
     const effectiveProgress =
       isQuickPreviewActive && quickPreviewProgress !== undefined
         ? Math.min(1, Math.max(0, quickPreviewProgress))
@@ -1855,6 +1882,18 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
         >
           {routes.map((route) => {
             if (route.points.length === 0) return null;
+            const isPrimaryActiveRoute = route === routes[0];
+            const isContinuousPlayback = Boolean(
+              isPlaying || (isQuickPreviewActive && (isQuickPreviewPlaying ?? true))
+            );
+            const cachedPlayback =
+              isPrimaryActiveRoute &&
+              isContinuousPlayback &&
+              lastPlaybackProjectionRef.current &&
+              lastPlaybackProjectionRef.current.routeId === route.id
+                ? lastPlaybackProjectionRef.current
+                : null;
+
             const rawProgress =
               duration && duration > 0 && currentTime !== undefined
                 ? Math.min(1, Math.max(0, currentTime / duration))
@@ -1863,14 +1902,17 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
               duration && duration > 0 && route.startOffsetSec
                 ? Math.min(0.9, Math.max(0, route.startOffsetSec / duration))
                 : 0;
-            const progress =
-              isQuickPreviewActive && quickPreviewProgress !== undefined
-                ? Math.min(1, Math.max(0, quickPreviewProgress))
-                : rawProgress <= offsetRatio
-                ? 0
-                : Math.min(1, (rawProgress - offsetRatio) / (1 - offsetRatio));
+            const progress = cachedPlayback
+              ? cachedPlayback.progress
+              : isQuickPreviewActive && quickPreviewProgress !== undefined
+              ? Math.min(1, Math.max(0, quickPreviewProgress))
+              : rawProgress <= offsetRatio
+              ? 0
+              : Math.min(1, (rawProgress - offsetRatio) / (1 - offsetRatio));
 
-            const snakeSample = getSmoothSnakePath(route.points, progress);
+            const snakeSample = cachedPlayback
+              ? cachedPlayback.snakeSample
+              : getSmoothSnakePath(route.points, progress);
             if (!snakeSample) return null;
 
             const currentPoints = snakeSample.drawnPoints;
@@ -1902,7 +1944,6 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
             );
             const shouldHideSvgLine = Boolean(route.hideLine || (isAirMode && isPlaybackActive));
 
-            const isPrimaryActiveRoute = route === routes[0];
             const strokeW = Math.max(
               3,
               ((route.width !== undefined && route.width <= 4) ? route.width : 3.5) * scale
@@ -1915,7 +1956,11 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
                 : undefined;
 
             // Perspective-safe near-plane frustum projection (Option A)
-            const proj = computeOptionARouteProjection(map, currentPoints, snakeSample.headingDeg);
+            // Reuse cached projection during continuous 60 Hz playback to prevent duplicate projection work
+            // and prevent 30 Hz React state commits from overwriting newer imperative DOM attributes.
+            const proj = cachedPlayback
+              ? cachedPlayback.proj
+              : computeOptionARouteProjection(map, currentPoints, snakeSample.headingDeg);
             const d = proj.d;
             const startDotPos = proj.startDotPos;
             const tipPos = proj.tipPos;

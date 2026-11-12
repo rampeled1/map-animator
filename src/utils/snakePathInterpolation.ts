@@ -25,6 +25,60 @@ export interface SnakePathSample {
   segmentIndex: number;
 }
 
+interface CumulativeDistCacheEntry {
+  length: number;
+  firstLng: number;
+  firstLat: number;
+  midLng: number;
+  midLat: number;
+  lastLng: number;
+  lastLat: number;
+  cumDists: number[];
+}
+
+const cumulativeDistCache = new WeakMap<RoutePoint[], CumulativeDistCacheEntry>();
+
+function getOrComputeCumulativeDistances(rawPoints: RoutePoint[]): number[] {
+  const len = rawPoints.length;
+  const first = rawPoints[0];
+  const mid = rawPoints[len >> 1];
+  const last = rawPoints[len - 1];
+
+  const cached = cumulativeDistCache.get(rawPoints);
+  if (
+    cached &&
+    cached.length === len &&
+    cached.firstLng === first.lng &&
+    cached.firstLat === first.lat &&
+    cached.midLng === mid.lng &&
+    cached.midLat === mid.lat &&
+    cached.lastLng === last.lng &&
+    cached.lastLat === last.lat
+  ) {
+    return cached.cumDists;
+  }
+
+  const cumDists: number[] = new Array(len);
+  cumDists[0] = 0;
+  for (let i = 0; i < len - 1; i++) {
+    const d = haversineMeters(rawPoints[i], rawPoints[i + 1]);
+    cumDists[i + 1] = cumDists[i] + Math.max(d, 0.001);
+  }
+
+  cumulativeDistCache.set(rawPoints, {
+    length: len,
+    firstLng: first.lng,
+    firstLat: first.lat,
+    midLng: mid.lng,
+    midLat: mid.lat,
+    lastLng: last.lng,
+    lastLat: last.lat,
+    cumDists,
+  });
+
+  return cumDists;
+}
+
 /**
  * Calculates continuous sub-pixel / sub-segment path drawing and vehicle tip kinematics.
  * Moves continuously and smoothly like a snake rather than jumping between discrete waypoints.
@@ -47,17 +101,13 @@ export function getSmoothSnakePath(
     return {
       tipPoint: { ...first },
       headingDeg: initialHeading,
-      drawnPoints: [{ ...first }],
+      drawnPoints: [first],
       segmentIndex: 0,
     };
   }
 
-  // Pre-calculate cumulative geodesic distances
-  const cumDists: number[] = [0];
-  for (let i = 0; i < rawPoints.length - 1; i++) {
-    const d = haversineMeters(rawPoints[i], rawPoints[i + 1]);
-    cumDists.push(cumDists[i] + Math.max(d, 0.001));
-  }
+  // Retrieve or pre-calculate cumulative geodesic distances via WeakMap cache
+  const cumDists = getOrComputeCumulativeDistances(rawPoints);
   const totalDist = cumDists[cumDists.length - 1];
 
   if (pClamped >= 1) {
@@ -69,17 +119,24 @@ export function getSmoothSnakePath(
     return {
       tipPoint: { ...last },
       headingDeg: finalHeading,
-      drawnPoints: rawPoints.map((pt) => ({ ...pt })),
+      drawnPoints: rawPoints,
       segmentIndex: rawPoints.length - 2,
     };
   }
 
-  // Target distance along trajectory
+  // Target distance along trajectory using binary search over cumDists
   const targetDist = pClamped * totalDist;
-  let segIdx = 0;
-  while (segIdx < cumDists.length - 2 && cumDists[segIdx + 1] < targetDist) {
-    segIdx++;
+  let low = 0;
+  let high = cumDists.length - 2;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (cumDists[mid + 1] < targetDist) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
   }
+  const segIdx = low;
 
   const segStartDist = cumDists[segIdx];
   const segEndDist = cumDists[segIdx + 1];
@@ -118,9 +175,9 @@ export function getSmoothSnakePath(
     smoothHeading = (segHeading + diff * blendFactor + 360) % 360;
   }
 
-  // Points drawn up to current tip
+  // Points drawn up to current tip without cloning original RoutePoint references
   const drawnPoints: RoutePoint[] = [
-    ...rawPoints.slice(0, segIdx + 1).map((pt) => ({ ...pt })),
+    ...rawPoints.slice(0, segIdx + 1),
     tipPoint,
   ];
 

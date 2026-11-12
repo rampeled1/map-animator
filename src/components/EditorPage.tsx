@@ -290,7 +290,10 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   const stageRef = useRef<HTMLDivElement>(null);
 
   const canonicalRoute = project.routes?.[0];
-  const projectRoutes: Route[] = [getAdaptedCanonicalRoute(canonicalRoute)];
+  const projectRoutes: Route[] = useMemo(
+    () => [getAdaptedCanonicalRoute(canonicalRoute)],
+    [canonicalRoute]
+  );
 
   // Quick Route Preview state
   const [quickPreviewState, setQuickPreviewState] = useState<QuickPreviewState>('idle');
@@ -455,6 +458,10 @@ export const EditorPage: React.FC<EditorPageProps> = ({
           isQuickPreview: true,
         });
       } else {
+        // Correction E: Schedule next frame's rAF callback FIRST (before updatePlaybackFrame triggers MapLibre's repaint rAF)
+        // so the authoritative playback clock always runs as Callback #1 ahead of MapLibre's _render (Callback #2) in every frame.
+        previewRafRef.current = requestAnimationFrame(tick);
+
         // High-frequency 60Hz update directly to MapViewer (camera, vehicle, SVG route)
         mapViewerRef.current?.updatePlaybackFrame({
           progress: nextProgress,
@@ -469,12 +476,17 @@ export const EditorPage: React.FC<EditorPageProps> = ({
           lastQuickPreviewUIUpdateRef.current = now;
           setQuickPreviewProgress(nextProgress);
         }
-
-        previewRafRef.current = requestAnimationFrame(tick);
       }
     };
 
     previewRafRef.current = requestAnimationFrame(tick);
+    mapViewerRef.current?.updatePlaybackFrame({
+      progress: previewProgressRef.current,
+      dtSec: 0,
+      rafTime: previewLastTimeRef.current,
+      isPlaying: false,
+      isQuickPreview: true,
+    });
 
     return () => {
       if (previewRafRef.current !== null) {
@@ -561,6 +573,10 @@ export const EditorPage: React.FC<EditorPageProps> = ({
       currentTimeRef.current = nextTime;
       const progress = duration > 0 ? nextTime / duration : 0;
 
+      // Correction E: Schedule next frame's rAF callback FIRST (before updatePlaybackFrame triggers MapLibre's repaint rAF)
+      // so the authoritative playback clock always runs as Callback #1 ahead of MapLibre's _render (Callback #2) in every frame.
+      frameId = requestAnimationFrame(loop);
+
       // High-frequency 60Hz update directly to MapViewer (camera, vehicle, SVG route)
       mapViewerRef.current?.updatePlaybackFrame({
         progress,
@@ -576,11 +592,17 @@ export const EditorPage: React.FC<EditorPageProps> = ({
         lastTimelineUIUpdateRef.current = now;
         setCurrentTime(nextTime);
       }
-
-      frameId = requestAnimationFrame(loop);
     };
 
     frameId = requestAnimationFrame(loop);
+    mapViewerRef.current?.updatePlaybackFrame({
+      progress: duration > 0 ? currentTimeRef.current / duration : 0,
+      currentTime: currentTimeRef.current,
+      dtSec: 0,
+      rafTime: lastTime,
+      isPlaying: true,
+      isQuickPreview: false,
+    });
     return () => cancelAnimationFrame(frameId);
   }, [isPlaying, duration, playbackSpeed, isRendering, renderAllScenes, activeSceneIndex, project.scenes.length]);
 
