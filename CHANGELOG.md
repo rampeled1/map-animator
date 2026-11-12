@@ -2,6 +2,31 @@
 
 All notable changes to the Map Animator project are documented in this file.
 
+## [1.2.0] - 2026-11-12
+
+### Added & Changed (Stage 5–8 Architecture & Stabilization)
+- **Geographic Distance-Driven Quick Route Preview (Stage 8)**:
+  - Added interactive in-panel Quick Route Preview (`start`, `pause`, `resume`, `restart`, `seek`) to the Route step with synchronized distance HUD.
+  - Implemented 1,000-sample Catmull-Rom spline lookup table mapping normalized geographic cumulative distance to 3D spline parameters with < 5m accuracy across all route topologies.
+  - Constant physical speed playback support (`Slow` 30 km/h, `Normal` 60 km/h, `Fast` 120 km/h).
+- **Stabilization & Bug Fixing (B01 - B15)**:
+  - **B01 & B07 (Destination Input & Autocomplete)**: Fixed destination input clearing and backspace blocking; enhanced search autocomplete with backdrop blur, scroll containment (`max-h-56`), Escape key dismiss, and standardized title-casing preserving IATA airport codes (GYD, TLV, JFK, etc.).
+  - **B02 & B09 (Interactive Stop Markers)**: Replaced permanent static destination preview with interactive, draggable stop pins (Start, Destination, Intermediate) synchronized with `canonicalRoute.stops`.
+  - **B03 & B04 (Unified Preview Controls)**: Bound Quick Route Preview progress directly to the 2D SVG path and vehicle arrow rendering; unified the footer play button and Space bar shortcut to toggle route preview during the Route step.
+  - **B05 (Route Status Badges)**: Prevented contradictory simultaneous display of stale and ready badges by conditioning `"✓ Route ready"` strictly on `canonicalRoute.status === 'calculated'`.
+  - **B06 & B08 (Crisp Line Presentation)**: Removed cluttered internal densified anchor dots from road routes; refined route line core stroke to 3.5px with a subtle 5.5px casing halo.
+  - **B10 (Movable Title Object)**: Added `titleX` and `titleY` coordinates to `OverlayConfig` for interactive, draggable title and subtitle map objects.
+  - **B11 (Photos Along Route)**: Positioned non-GPS photos evenly along the active route geometry instead of defaulting to Rome; ensured `onPassed` photos remain visible through the end of the video.
+  - **B12 (Road Snapping & Densification)**: Preserved the initial road vertex in `densifyRoadCoordinates` and safeguarded road snapping from falling back to straight lines across water.
+  - **B13 & B15 (Smooth 60fps Camera Movement)**: Replaced canceling 100ms `easeTo` tweens with synchronous `map.jumpTo` frame updates during playback; cached bounding box recalculation in Whole Tour to prevent 60fps interaction lockup.
+  - **B14 (Streamlined Camera Tab)**: Simplified presets to strictly **Fly Along** and **Whole Tour** in a 2-column studio layout, removing legacy rig overrides.
+- **Robust Pointer Capture & Drag Protection (Stage 7)**:
+  - Added pointer capture with capture-phase fallback listeners (`useCapture: true`) for stop and sign dragging.
+- **Strict 6-Mode Canonical Transport & Multi-Leg Architecture (Stage 6)**:
+  - Canonical routing profiles: Follow Roads (Car, Walking, Bike via OSRM) and Free Mode (Train via rail geodesic, Boat via maritime arc, Plane via 3D flight arc).
+- **Canonical Route Persistence & Staged Calculation (Stage 5)**:
+  - Single canonical route model stored at `MapProject.routes[0]` (Schema v2); immutable updates, centralized invalidation, and staged rollback.
+
 ## [1.1.0] - 2026-11-09 (v4.0.0 Phase 2 — Responsive Interface Prototype)
 
 ### Added & Changed

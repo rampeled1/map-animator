@@ -525,6 +525,16 @@ export const HomePage: React.FC<HomePageProps> = ({
 
               <div className="space-y-4 text-xs text-[var(--text)] leading-relaxed">
                 <div className="border-l-2 border-[var(--accent)] pl-3">
+                  <h3 className="font-bold text-sm text-[var(--text)]">12 November 2026 (v1.2.0)</h3>
+                  <p className="text-[var(--muted)]">
+                    <b>Quick Route Preview:</b> Play, pause, scrub, and preview your journey directly in the Route step at constant physical speeds with live remaining distance.<br />
+                    <b>Interactive draggable stop pins:</b> Move your destination and stops directly on the map with real-time route recalculation.<br />
+                    <b>Movable title:</b> Drag the trip title and subtitle directly on the map to place it anywhere on screen.<br />
+                    <b>Smooth 60fps camera:</b> Perfectly smooth Fly Along camera tracking and auto-framed Whole Tour overview.<br />
+                    <b>Enhanced autocomplete & road snapping:</b> Airport IATA code search, clean place name formatting, and refined 3.5px route lines.
+                  </p>
+                </div>
+                <div className="border-l-2 border-[var(--accent)] pl-3">
                   <h3 className="font-bold text-sm text-[var(--text)]">2 November 2026 (v0.3.0)</h3>
                   <p className="text-[var(--muted)]">
                     <b>Auto-routing point spacing (0.1–20 km / Auto):</b> Resample dense road geometries to custom point intervals or adaptive auto-spacing.<br />
