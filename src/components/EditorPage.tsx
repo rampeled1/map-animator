@@ -42,7 +42,8 @@ import { SnapProfile, getRoadRoute } from '../utils/roadRouter';
 import { calculateTrackStats } from '../utils/gpxParser';
 import { exportProjectFile } from '../utils/projectStorage';
 import { startCanvasRecording } from '../utils/videoRecorder';
-import { mapPresetToCameraBlocks } from '../utils/cameraPresetMapper';
+import { mapPresetToCameraBlocks, shortestAngularDiff } from '../utils/cameraPresetMapper';
+import { getSmoothSnakePath } from '../utils/snakePathInterpolation';
 import {
   PRIMARY_THEMES,
   MORE_THEMES_LIST,
@@ -254,11 +255,16 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   };
 
   // Camera settings state (Follow, Still, Tripod, Orbit)
-  const [cameraMode, setCameraMode] = useState<'follow' | 'still' | 'orbit' | 'tripod'>('follow');
-  const [followOrient, setFollowOrient] = useState<'north' | 'heading'>('north');
+  const initialPreset: CameraModePreset = project.cameraPreset || 'fly_along';
+  const [cameraMode, setCameraMode] = useState<'follow' | 'still' | 'orbit' | 'tripod'>(
+    initialPreset === 'whole_tour' ? 'still' : 'follow'
+  );
+  const [followOrient, setFollowOrient] = useState<'north' | 'heading'>(
+    initialPreset === 'fly_along' ? 'heading' : 'north'
+  );
   const [rotateOffset, setRotateOffset] = useState<number>(0);
-  const [followZoom, setFollowZoom] = useState(8);
-  const [tilt, setTilt] = useState(0);
+  const [followZoom, setFollowZoom] = useState(initialPreset === 'fly_along' ? 12 : 8);
+  const [tilt, setTilt] = useState(initialPreset === 'fly_along' ? 50 : (initialPreset === 'whole_tour' ? 10 : 0));
   const [lookAhead] = useState(0.15);
   const [distanceKm, setDistanceKm] = useState<number>(2.3);
   const [heightKm, setHeightKm] = useState<number>(2.9);
@@ -915,21 +921,42 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   };
 
   const handleMapCameraChange = (cam: {
+    changeType?: 'zoom' | 'pitch' | 'rotate';
     zoom: number;
     pitch: number;
     bearing: number;
     center: [number, number];
   }) => {
     if (currentStep !== 'camera') return;
-    setFollowZoom(cam.zoom);
-    setTilt(cam.pitch);
-    setRotateOffset(cam.bearing);
+    if (isPlaying) return;
+
+    if (!cam.changeType || cam.changeType === 'zoom') {
+      setFollowZoom(cam.zoom);
+    }
+    if (!cam.changeType || cam.changeType === 'pitch') {
+      setTilt(cam.pitch);
+    }
+
+    let nextRotateOffset = rotateOffset;
+    if (!cam.changeType || cam.changeType === 'rotate') {
+      if (followOrient === 'heading') {
+        const progress = duration > 0 ? Math.min(1, Math.max(0, currentTime / duration)) : 0;
+        const pts = projectRoutes[0]?.points || [];
+        const snakeSample = pts.length > 0 ? getSmoothSnakePath(pts, progress) : null;
+        const vehicleHeading = snakeSample ? snakeSample.headingDeg : 0;
+        nextRotateOffset = shortestAngularDiff(cam.bearing, vehicleHeading);
+      } else {
+        nextRotateOffset = cam.bearing;
+      }
+      setRotateOffset(nextRotateOffset);
+    }
+
     if (activeCameraBlock) {
       handleUpdateActiveCameraBlock({
-        zoom: cam.zoom,
-        pitch: cam.pitch,
+        zoom: (!cam.changeType || cam.changeType === 'zoom') ? cam.zoom : activeCameraBlock.zoom,
+        pitch: (!cam.changeType || cam.changeType === 'pitch') ? cam.pitch : activeCameraBlock.pitch,
         bearing: cam.bearing,
-        rotateOffset: cam.bearing,
+        rotateOffset: (!cam.changeType || cam.changeType === 'rotate') ? nextRotateOffset : activeCameraBlock.rotateOffset,
         center: cam.center,
       });
     }

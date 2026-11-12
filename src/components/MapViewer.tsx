@@ -6,7 +6,7 @@ import { calculateTrackStats } from '../utils/gpxParser';
 import { ThreeMapLayer } from '../utils/threeMapLayer';
 import { ModelKind3D } from '../utils/vehicle3DManager';
 import { getSmoothSnakePath } from '../utils/snakePathInterpolation';
-import { computeRouteBounds } from '../utils/cameraPresetMapper';
+import { computeRouteBounds, shortestAngularDiff } from '../utils/cameraPresetMapper';
 import { WaypointOptionsModal } from './WaypointOptionsModal';
 
 function mapTransportTo3DModel(transport?: TransportType): ModelKind3D {
@@ -20,13 +20,6 @@ function mapTransportTo3DModel(transport?: TransportType): ModelKind3D {
   return 'car';
 }
 
-/**
- * Calculates the shortest signed angular difference between target and current degrees.
- * Guaranteed in range [-180, +180]. Prevents 360° spinning across 0°/360° or 180°/-180°.
- */
-function shortestAngularDiff(targetDeg: number, currentDeg: number): number {
-  return ((((targetDeg - currentDeg + 540) % 360) + 360) % 360) - 180;
-}
 
 interface MapViewerProps {
   themeId: string;
@@ -72,6 +65,7 @@ interface MapViewerProps {
   onAddSign?: (sign: MapSign) => void;
   onUpdateSign?: (sign: MapSign) => void;
   onMapCameraChange?: (cam: {
+    changeType?: 'zoom' | 'pitch' | 'rotate';
     zoom: number;
     pitch: number;
     bearing: number;
@@ -489,6 +483,10 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   const lastWholeTourKeyRef = useRef<string>('');
   const followBearingRef = useRef<number | null>(null);
   const lastFollowProgressRef = useRef<number>(0);
+  const lastFollowTimeRef = useRef<number | null>(null);
+  const isProgrammaticCameraChangeRef = useRef<boolean>(false);
+  const isPlayingRef = useRef<boolean>(isPlaying);
+  isPlayingRef.current = isPlaying;
   const onCancelInteractionRef = useRef(onCancelInteraction);
   onCancelInteractionRef.current = onCancelInteraction;
   const currentStepRef = useRef<StepId>(currentStep);
@@ -666,19 +664,31 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
     map.on('style.load', ensureThreeLayer);
 
-    const handleCameraUserChange = () => {
-      if (currentStepRef.current === 'camera' && onMapCameraChangeRef.current) {
-        onMapCameraChangeRef.current({
-          zoom: Math.round(map.getZoom() * 10) / 10,
-          pitch: Math.round(map.getPitch()),
-          bearing: Math.round(map.getBearing()),
-          center: [map.getCenter().lng, map.getCenter().lat],
-        });
-      }
+    const handleCameraUserChange = (
+      e: maplibregl.MapLibreEvent<any>,
+      changeType: 'zoom' | 'pitch' | 'rotate'
+    ) => {
+      // 1. Explicit programmatic update guard
+      if (isProgrammaticCameraChangeRef.current) return;
+      // 2. Do not interpret programmatic playback tracking as user edits
+      if (isPlayingRef.current) return;
+      // 3. Must be a genuine user gesture with a real original DOM event (MouseEvent, TouchEvent, etc.)
+      if (!e || !e.originalEvent) return;
+      // 4. Only listen for camera adjustments on the Camera step
+      if (currentStepRef.current !== 'camera') return;
+      if (!onMapCameraChangeRef.current) return;
+
+      onMapCameraChangeRef.current({
+        changeType,
+        zoom: Math.round(map.getZoom() * 10) / 10,
+        pitch: Math.round(map.getPitch()),
+        bearing: Math.round(map.getBearing()),
+        center: [map.getCenter().lng, map.getCenter().lat],
+      });
     };
-    map.on('zoomend', handleCameraUserChange);
-    map.on('pitchend', handleCameraUserChange);
-    map.on('rotateend', handleCameraUserChange);
+    map.on('zoomend', (e) => handleCameraUserChange(e, 'zoom'));
+    map.on('pitchend', (e) => handleCameraUserChange(e, 'pitch'));
+    map.on('rotateend', (e) => handleCameraUserChange(e, 'rotate'));
 
     mapRef.current = map;
 
@@ -820,11 +830,20 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     // Check if a timeline cameraBlock overrides the mode at this playhead ratio
     const sortedBlocks = cameraBlocks.slice().sort((a, b) => a.tRatio - b.tRatio);
     const activeBlock = sortedBlocks.filter((cb) => cb.tRatio <= progress).pop();
-    const effectiveMode = activeBlock ? activeBlock.kind : cameraMode || 'follow';
-    const effectivePitch = activeBlock ? activeBlock.pitch : tilt;
-    const effectiveZoom = activeBlock ? activeBlock.zoom : followZoom;
+    const isFlyAlongPreset = activeBlock
+      ? activeBlock.kind === 'follow' && activeBlock.followOrient === 'heading'
+      : (cameraPreset === 'fly_along' || (!cameraPreset && !activeBlock));
+    const effectiveMode = activeBlock
+      ? activeBlock.kind
+      : (cameraPreset === 'whole_tour' ? 'still' : (cameraMode || 'follow'));
+    const effectivePitch = activeBlock
+      ? activeBlock.pitch
+      : (tilt !== 0 ? tilt : (isFlyAlongPreset ? 50 : (cameraPreset === 'whole_tour' ? 10 : 0)));
+    const effectiveZoom = activeBlock
+      ? activeBlock.zoom
+      : (followZoom !== 8 ? followZoom : (isFlyAlongPreset ? 12 : 8));
     const effectiveRotate = activeBlock?.rotateOffset ?? rotateOffset;
-    const effectiveFollowOrient = activeBlock?.followOrient ?? followOrient;
+    const effectiveFollowOrient = activeBlock?.followOrient ?? (isFlyAlongPreset ? 'heading' : followOrient);
     const effectiveDistKm = activeBlock?.distanceKm ?? distanceKm ?? 2.3;
     const effectiveHeightKm = activeBlock?.heightKm ?? heightKm ?? 2.9;
     const effectiveOrbitDir = activeBlock?.orbitDirection ?? orbitDirection ?? 'clockwise';
@@ -839,31 +858,41 @@ export const MapViewer: React.FC<MapViewerProps> = ({
           lastWholeTourKeyRef.current = tourKey;
           const bounds = computeRouteBounds(pts);
           if (bounds) {
-            map.fitBounds(
-              [
-                [bounds.minLng, bounds.minLat],
-                [bounds.maxLng, bounds.maxLat],
-              ],
-              {
-                padding: { top: 60, bottom: 60, left: 60, right: 60 },
-                pitch: effectivePitch !== undefined ? effectivePitch : 10,
-                bearing: 0,
-                duration: 800,
-              }
-            );
+            isProgrammaticCameraChangeRef.current = true;
+            try {
+              map.fitBounds(
+                [
+                  [bounds.minLng, bounds.minLat],
+                  [bounds.maxLng, bounds.maxLat],
+                ],
+                {
+                  padding: { top: 60, bottom: 60, left: 60, right: 60 },
+                  pitch: effectivePitch !== undefined ? effectivePitch : 10,
+                  bearing: 0,
+                  duration: 800,
+                }
+              );
+            } finally {
+              isProgrammaticCameraChangeRef.current = false;
+            }
           }
         }
         return;
       }
 
       if (activeBlock) {
-        map.easeTo({
-          center: activeBlock.center,
-          zoom: activeBlock.zoom,
-          pitch: activeBlock.pitch,
-          bearing: activeBlock.bearing,
-          duration: isPlaying ? 120 : 0,
-        });
+        isProgrammaticCameraChangeRef.current = true;
+        try {
+          map.easeTo({
+            center: activeBlock.center,
+            zoom: activeBlock.zoom,
+            pitch: activeBlock.pitch,
+            bearing: activeBlock.bearing,
+            duration: isPlaying ? 120 : 0,
+          });
+        } finally {
+          isProgrammaticCameraChangeRef.current = false;
+        }
       }
       return;
     }
@@ -888,20 +917,30 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       const progressJump = Math.abs(progress - lastFollowProgressRef.current);
       lastFollowProgressRef.current = progress;
 
+      const now = performance.now();
+      const lastTime = lastFollowTimeRef.current ?? now;
+      lastFollowTimeRef.current = now;
+      // Cap delta time to [0.001, 0.1]s to guard against background tab pause spikes
+      const dtSec = Math.max(0.001, Math.min(0.1, (now - lastTime) / 1000));
+
       let bearing: number;
       if (followBearingRef.current === null || !isPlaying || progressJump > 0.05) {
         // Immediate orientation lock on preset change, pause, seek, or restart
         bearing = targetBearing;
         followBearingRef.current = targetBearing;
       } else {
-        // Continuous shortest-signed-angular-difference filter during playback
+        // Continuous shortest-signed-angular-difference time-based smoothing
         // Eliminates 360° spins across North/South and smooths curve transitions
         const diff = shortestAngularDiff(targetBearing, followBearingRef.current);
-        const alpha = 0.20; // Smooth gradual turning
-        const unclampedStep = alpha * diff;
-        // Cap maximum rotational angular speed to prevent whipping on extreme 180° hairpins
-        const maxAngularSpeed = 6.0;
-        const step = Math.max(-maxAngularSpeed, Math.min(maxAngularSpeed, unclampedStep));
+        // Exponential decay rate lambda = 8.0 s^-1 gives responsive tracking (~0.35s settling time)
+        const lambda = 8.0;
+        const timeDecayFactor = 1 - Math.exp(-lambda * dtSec);
+        const unclampedStep = diff * timeDecayFactor;
+        // Bounded angular speed in degrees per second: 180°/sec ensures realistic, smooth rotation
+        // across sharp hairpins without whipping, identical across 30, 60, and 120 FPS
+        const maxAngularSpeedDegPerSec = 180.0;
+        const maxStep = maxAngularSpeedDegPerSec * dtSec;
+        const step = Math.sign(unclampedStep) * Math.min(Math.abs(unclampedStep), maxStep);
         const next = followBearingRef.current + step;
         bearing = ((next % 360) + 360) % 360;
         followBearingRef.current = bearing;
@@ -910,21 +949,26 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       // Lock center strictly to vehicle position to prevent viewport drift or pendulum swings
       const centerPos: [number, number] = vehicleLngLat;
 
-      if (isPlaying) {
-        map.jumpTo({
-          center: centerPos,
-          zoom: effectiveZoom,
-          pitch: effectivePitch,
-          bearing,
-        });
-      } else {
-        map.easeTo({
-          center: centerPos,
-          zoom: effectiveZoom,
-          pitch: effectivePitch,
-          bearing,
-          duration: 100,
-        });
+      isProgrammaticCameraChangeRef.current = true;
+      try {
+        if (isPlaying) {
+          map.jumpTo({
+            center: centerPos,
+            zoom: effectiveZoom,
+            pitch: effectivePitch,
+            bearing,
+          });
+        } else {
+          map.easeTo({
+            center: centerPos,
+            zoom: effectiveZoom,
+            pitch: effectivePitch,
+            bearing,
+            duration: 100,
+          });
+        }
+      } finally {
+        isProgrammaticCameraChangeRef.current = false;
       }
     } else {
       followBearingRef.current = null;
@@ -943,16 +987,21 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       const radPitch = Math.atan2(effectiveDistKm, effectiveHeightKm);
       const computedPitch = Math.min(80, Math.max(10, Math.round((radPitch * 180) / Math.PI)));
 
-      map.easeTo({
-        center: [
-          standOrigin[0] + dLng * 0.35,
-          standOrigin[1] + dLat * 0.35,
-        ],
-        zoom: effectiveZoom,
-        pitch: computedPitch,
-        bearing: swivelBearing,
-        duration: isPlaying ? 100 : 0,
-      });
+      isProgrammaticCameraChangeRef.current = true;
+      try {
+        map.easeTo({
+          center: [
+            standOrigin[0] + dLng * 0.35,
+            standOrigin[1] + dLat * 0.35,
+          ],
+          zoom: effectiveZoom,
+          pitch: computedPitch,
+          bearing: swivelBearing,
+          duration: isPlaying ? 100 : 0,
+        });
+      } finally {
+        isProgrammaticCameraChangeRef.current = false;
+      }
     } else if (effectiveMode === 'orbit') {
       // Circles the vehicle once over the length of this camera block
       let blockProgress = progress;
@@ -966,13 +1015,18 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       const dirMult = effectiveOrbitDir === 'anticlockwise' ? -1 : 1;
       const orbitBearing = ((blockProgress * 360 * dirMult) % 360) + (activeBlock?.bearing || 0);
 
-      map.easeTo({
-        center: vehicleLngLat,
-        zoom: effectiveZoom,
-        pitch: effectivePitch,
-        bearing: orbitBearing,
-        duration: isPlaying ? 100 : 0,
-      });
+      isProgrammaticCameraChangeRef.current = true;
+      try {
+        map.easeTo({
+          center: vehicleLngLat,
+          zoom: effectiveZoom,
+          pitch: effectivePitch,
+          bearing: orbitBearing,
+          duration: isPlaying ? 100 : 0,
+        });
+      } finally {
+        isProgrammaticCameraChangeRef.current = false;
+      }
     }
   }, [
     currentTime,

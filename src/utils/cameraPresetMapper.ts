@@ -13,6 +13,13 @@ export interface RouteBounds {
 }
 
 /**
+ * Computes shortest signed angular difference along circular arc [-180, +180].
+ */
+export function shortestAngularDiff(targetDeg: number, currentDeg: number): number {
+  return ((((targetDeg - currentDeg + 540) % 360) + 360) % 360) - 180;
+}
+
+/**
  * Computes bounding box from route points
  */
 export function computeRouteBounds(points: RoutePoint[]): RouteBounds | null {

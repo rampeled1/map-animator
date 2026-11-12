@@ -63,7 +63,19 @@ export function createNewProject(existingProjects: ProjectSummary[] = []): MapPr
     holdEndSec: 2,
     mapThemeId: 'liberty',
     signs: [],
-    cameraBlocks: [],
+    cameraBlocks: [
+      {
+        id: `cam-${now}-fly-along`,
+        tRatio: 0,
+        kind: 'follow',
+        followOrient: 'heading',
+        center: [0, 0],
+        pitch: 50,
+        zoom: 12,
+        bearing: 0,
+        easing: 'smooth',
+      },
+    ],
     overlays: {
       showDistance: true,
       showAltitude: true,
