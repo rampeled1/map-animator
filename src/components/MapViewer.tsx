@@ -78,6 +78,7 @@ interface MapViewerProps {
   fitRouteRequested?: Route | null;
   destinationPreview?: DestinationPreview | null;
   isQuickPreviewActive?: boolean;
+  isQuickPreviewPlaying?: boolean;
   quickPreviewProgress?: number;
   quickPreviewRemainingDistance?: string;
   canonicalRoute?: CanonicalRoute;
@@ -461,6 +462,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   fitRouteRequested,
   destinationPreview,
   isQuickPreviewActive,
+  isQuickPreviewPlaying,
   quickPreviewProgress,
   quickPreviewRemainingDistance,
   canonicalRoute,
@@ -509,6 +511,12 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   const lastFollowProgressRef = useRef<number>(0);
   const lastFollowTimeRef = useRef<number | null>(null);
   const isProgrammaticCameraChangeRef = useRef<boolean>(false);
+  const isPlaybackActive = Boolean(
+    isPlaying ||
+    (isQuickPreviewActive && (isQuickPreviewPlaying !== undefined ? isQuickPreviewPlaying : true))
+  );
+  const isPlaybackActiveRef = useRef<boolean>(isPlaybackActive);
+  isPlaybackActiveRef.current = isPlaybackActive;
   const isPlayingRef = useRef<boolean>(isPlaying);
   isPlayingRef.current = isPlaying;
   const onCancelInteractionRef = useRef(onCancelInteraction);
@@ -635,8 +643,8 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
     let rafId = 0;
     const triggerSync = () => {
-      // Prevent redundant React re-renders during active playback (playback is already driven by currentTime)
-      if (isPlayingRef.current) return;
+      // Prevent redundant React re-renders during active playback (playback is already driven by currentTime or quick preview)
+      if (isPlaybackActiveRef.current) return;
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = 0;
@@ -697,7 +705,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       // 1. Explicit programmatic update guard
       if (isProgrammaticCameraChangeRef.current) return;
       // 2. Do not interpret programmatic playback tracking as user edits
-      if (isPlayingRef.current) return;
+      if (isPlaybackActiveRef.current) return;
       // 3. Must be a genuine user gesture with a real original DOM event (MouseEvent, TouchEvent, etc.)
       if (!e || !e.originalEvent) return;
       // 4. Only listen for camera adjustments on the Camera step
@@ -733,24 +741,16 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     };
   }, []);
 
-  // Synchronize ThreeMapLayer with route geometry and animation progress
+  // Synchronize ThreeMapLayer with route geometry and model configuration
   useEffect(() => {
-    const progress =
-      isQuickPreviewActive && quickPreviewProgress !== undefined
-        ? Math.min(1, Math.max(0, quickPreviewProgress))
-        : (duration && duration > 0 && currentTime !== undefined
-          ? Math.min(1, Math.max(0, currentTime / duration))
-          : 1);
-    progressRef.current = progress;
-
     if (threeMapLayerRef.current && routes[0]?.points?.length) {
       const activeKind = mapTransportTo3DModel(routes[0].transportType);
       threeMapLayerRef.current.setModelKind(activeKind);
       threeMapLayerRef.current.setRoute(routes[0].points, routes[0].color || '#ff4d2e');
-      threeMapLayerRef.current.setProgress(progress);
+      threeMapLayerRef.current.setProgress(progressRef.current);
       mapRef.current?.triggerRepaint();
     }
-  }, [routes, currentTime, duration, isQuickPreviewActive, quickPreviewProgress]);
+  }, [routes]);
 
   // Quick Preview camera lock (interaction lock while preview is active)
   useEffect(() => {
@@ -843,19 +843,27 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !routes[0]?.points?.length) return;
-    const progress =
-      duration && duration > 0 && currentTime !== undefined
-        ? Math.min(1, Math.max(0, currentTime / duration))
-        : 1;
+    const effectiveProgress =
+      isQuickPreviewActive && quickPreviewProgress !== undefined
+        ? Math.min(1, Math.max(0, quickPreviewProgress))
+        : (duration && duration > 0 && currentTime !== undefined
+          ? Math.min(1, Math.max(0, currentTime / duration))
+          : 1);
+    progressRef.current = effectiveProgress;
 
-    if (isQuickPreviewActive) return;
-    // In route step, don't let video camera take over the user's view
-    if (currentStep === 'route') return;
-    if (!isPlaying && currentStep === 'signs') return;
+    // Single-pass synchronization: update ThreeMapLayer kinematics alongside camera
+    if (threeMapLayerRef.current && routes[0]?.points?.length) {
+      threeMapLayerRef.current.setProgress(effectiveProgress);
+    }
+
+    // In route step, allow camera tracking when Quick Route Preview is active;
+    // exit early only during manual route editing
+    if (currentStep === 'route' && !isQuickPreviewActive) return;
+    if (!isPlaybackActive && currentStep === 'signs') return;
 
     // Check if a timeline cameraBlock overrides the mode at this playhead ratio
     const sortedBlocks = cameraBlocks.slice().sort((a, b) => a.tRatio - b.tRatio);
-    const activeBlock = sortedBlocks.filter((cb) => cb.tRatio <= progress).pop();
+    const activeBlock = sortedBlocks.filter((cb) => cb.tRatio <= effectiveProgress).pop();
     const isFlyAlongPreset = cameraPreset === 'fly_along' || (!cameraPreset && (!activeBlock || (activeBlock.kind === 'follow' && activeBlock.followOrient === 'heading')));
     const effectiveMode = cameraPreset === 'whole_tour'
       ? 'still'
@@ -882,6 +890,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
     if (effectiveMode === 'still') {
       followBearingRef.current = null;
       followCenterRef.current = null;
+      mapRef.current?.triggerRepaint();
       if (cameraPreset === 'whole_tour' && pts.length > 0) {
         const tourKey = `${pts.length}-${pts[0]?.lat.toFixed(4)},${pts[0]?.lng.toFixed(4)}-${pts[pts.length - 1]?.lat.toFixed(4)},${pts[pts.length - 1]?.lng.toFixed(4)}`;
         if (lastWholeTourKeyRef.current !== tourKey) {
@@ -918,7 +927,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
             zoom: activeBlock.zoom,
             pitch: activeBlock.pitch,
             bearing: activeBlock.bearing,
-            duration: isPlaying ? 120 : 0,
+            duration: isPlaybackActive ? 120 : 0,
           });
         } finally {
           isProgrammaticCameraChangeRef.current = false;
@@ -927,10 +936,10 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       return;
     }
 
-    const snakeSample = getSmoothSnakePath(pts, progress);
+    const snakeSample = getSmoothSnakePath(pts, effectiveProgress);
     if (!snakeSample) return;
 
-    const kinematics = threeMapLayerRef.current?.getKinematics(progress);
+    const kinematics = threeMapLayerRef.current?.getKinematics(effectiveProgress);
     const vehicleLngLat: [number, number] = kinematics
       ? [kinematics.worldPoint[0], kinematics.worldPoint[1]]
       : [snakeSample.tipPoint.lng, snakeSample.tipPoint.lat];
@@ -944,8 +953,8 @@ export const MapViewer: React.FC<MapViewerProps> = ({
           ? ((normHeading + effectiveRotate) % 360 + 360) % 360
           : ((effectiveRotate % 360) + 360) % 360;
 
-      const progressJump = Math.abs(progress - lastFollowProgressRef.current);
-      lastFollowProgressRef.current = progress;
+      const progressJump = Math.abs(effectiveProgress - lastFollowProgressRef.current);
+      lastFollowProgressRef.current = effectiveProgress;
 
       const now = performance.now();
       const lastTime = lastFollowTimeRef.current ?? now;
@@ -954,7 +963,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
       const dtSec = Math.max(0.005, Math.min(0.05, (now - lastTime) / 1000));
 
       let bearing: number;
-      if (followBearingRef.current === null || !isPlaying || progressJump > 0.08) {
+      if (followBearingRef.current === null || !isPlaybackActive || progressJump > 0.08) {
         // Immediate orientation lock on preset change, pause, seek, or restart
         bearing = targetBearing;
         followBearingRef.current = targetBearing;
@@ -978,7 +987,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
 
       // Frame-rate-independent camera center interpolation harmonized with bearing (lambda = 10 s^-1)
       let centerPos: [number, number];
-      if (followCenterRef.current === null || !isPlaying || progressJump > 0.08) {
+      if (followCenterRef.current === null || !isPlaybackActive || progressJump > 0.08) {
         // Immediate position lock on preset change, pause, seek, or restart
         followCenterRef.current = [vehicleLngLat[0], vehicleLngLat[1]];
         centerPos = vehicleLngLat;
@@ -1032,20 +1041,20 @@ export const MapViewer: React.FC<MapViewerProps> = ({
           zoom: effectiveZoom,
           pitch: computedPitch,
           bearing: swivelBearing,
-          duration: isPlaying ? 100 : 0,
+          duration: isPlaybackActive ? 100 : 0,
         });
       } finally {
         isProgrammaticCameraChangeRef.current = false;
       }
     } else if (effectiveMode === 'orbit') {
       // Circles the vehicle once over the length of this camera block
-      let blockProgress = progress;
+      let blockProgress = effectiveProgress;
       if (activeBlock) {
         const activeIdx = sortedBlocks.indexOf(activeBlock);
         const nextBlock = sortedBlocks[activeIdx + 1];
         const startT = activeBlock.tRatio;
         const endT = nextBlock ? nextBlock.tRatio : 1;
-        blockProgress = endT > startT ? (progress - startT) / (endT - startT) : 0;
+        blockProgress = endT > startT ? (effectiveProgress - startT) / (endT - startT) : 0;
       }
       const dirMult = effectiveOrbitDir === 'anticlockwise' ? -1 : 1;
       const orbitBearing = ((blockProgress * 360 * dirMult) % 360) + (activeBlock?.bearing || 0);
@@ -1057,7 +1066,7 @@ export const MapViewer: React.FC<MapViewerProps> = ({
           zoom: effectiveZoom,
           pitch: effectivePitch,
           bearing: orbitBearing,
-          duration: isPlaying ? 100 : 0,
+          duration: isPlaybackActive ? 100 : 0,
         });
       } finally {
         isProgrammaticCameraChangeRef.current = false;
@@ -1066,6 +1075,9 @@ export const MapViewer: React.FC<MapViewerProps> = ({
   }, [
     currentTime,
     duration,
+    isQuickPreviewActive,
+    isQuickPreviewPlaying,
+    quickPreviewProgress,
     cameraMode,
     followOrient,
     followZoom,
@@ -1747,9 +1759,11 @@ export const MapViewer: React.FC<MapViewerProps> = ({
           {signs &&
             (() => {
               const progressRatio =
-                duration && duration > 0 && currentTime !== undefined
-                  ? Math.min(1, Math.max(0, currentTime / duration))
-                  : 1;
+                isQuickPreviewActive && quickPreviewProgress !== undefined
+                  ? Math.min(1, Math.max(0, quickPreviewProgress))
+                  : (duration && duration > 0 && currentTime !== undefined
+                    ? Math.min(1, Math.max(0, currentTime / duration))
+                    : 1);
               const mainPts = routes[0]?.points || [];
               const currIdx = Math.min(
                 mainPts.length - 1,
@@ -2008,9 +2022,11 @@ export const MapViewer: React.FC<MapViewerProps> = ({
               if (elePts.length < 2) return null;
 
               const progressRatio =
-                duration && duration > 0 && currentTime !== undefined
-                  ? Math.min(1, Math.max(0, currentTime / duration))
-                  : 1;
+                isQuickPreviewActive && quickPreviewProgress !== undefined
+                  ? Math.min(1, Math.max(0, quickPreviewProgress))
+                  : (duration && duration > 0 && currentTime !== undefined
+                    ? Math.min(1, Math.max(0, currentTime / duration))
+                    : 1);
               const chartW = 240 * scale;
               const chartH = 44 * scale;
               const minE = Math.min(...elePts.map((p) => p.ele!));
@@ -2065,9 +2081,11 @@ export const MapViewer: React.FC<MapViewerProps> = ({
             overlays?.showClimbDescent) &&
             (() => {
               const progressRatio =
-                duration && duration > 0 && currentTime !== undefined
-                  ? Math.min(1, Math.max(0, currentTime / duration))
-                  : 1;
+                isQuickPreviewActive && quickPreviewProgress !== undefined
+                  ? Math.min(1, Math.max(0, quickPreviewProgress))
+                  : (duration && duration > 0 && currentTime !== undefined
+                    ? Math.min(1, Math.max(0, currentTime / duration))
+                    : 1);
               const pts = routes[0]?.points || [];
               const snake = getSmoothSnakePath(pts, progressRatio);
               const currIdx = snake ? snake.segmentIndex : 0;

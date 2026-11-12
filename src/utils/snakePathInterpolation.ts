@@ -1,4 +1,4 @@
-import type { RoutePoint } from '../types';
+import type { RoutePoint } from '../types/index.ts';
 
 /**
  * Geodesic distance in meters between two lat/lng points (Haversine formula)

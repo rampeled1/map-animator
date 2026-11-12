@@ -441,60 +441,6 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   const sortedCameraBlocks = (activeScene.cameraBlocks || []).slice().sort((a, b) => a.tRatio - b.tRatio);
   const activeCameraBlock = sortedCameraBlocks.filter((cb) => cb.tRatio <= playheadRatio).pop() || null;
 
-  // Global Keyboard Shortcuts (Official Help Guide feature + 'N' for Camera)
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
-
-      if (e.key === '1') setCurrentStep('route');
-      else if (e.key === '2') setCurrentStep('map');
-      else if (e.key === '3') setCurrentStep('signs');
-      else if (e.key === '4') setCurrentStep('overlays');
-      else if (e.key === '5') setCurrentStep('camera');
-      else if (e.key === '6') setCurrentStep('preview');
-      else if (e.key === ' ') {
-        e.preventDefault();
-        if (currentStep === 'route') {
-          if (quickPreviewState === 'playing') pauseQuickPreview();
-          else if (quickPreviewState === 'paused') resumeQuickPreview();
-          else if (quickPreviewState === 'finished') restartQuickPreview();
-          else startQuickPreview();
-        } else {
-          if (currentTime >= duration) {
-            setCurrentTime(0);
-            setIsPlaying(true);
-          } else {
-            setIsPlaying((p) => !p);
-          }
-        }
-      } else if (e.key === 'n' || e.key === 'N') {
-        e.preventDefault();
-        handleAddCameraBlock(cameraMode);
-      } else if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
-        e.preventDefault();
-        setHelpOpen((h) => {
-          if (!h) setHelpTab('shortcuts');
-          return !h;
-        });
-      } else if (e.key === 'Escape') {
-        setHelpOpen(false);
-        setMoreThemesOpen(false);
-      } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
-        e.preventDefault();
-        handleUndo();
-      } else if (
-        ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'z') ||
-        ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y')
-      ) {
-        e.preventDefault();
-        handleRedo();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeScene, activeRouteId, cameraMode, currentTime, duration, followZoom, tilt, rotateOffset, followOrient, distanceKm, heightKm, orbitDirection]);
-
   // Animation timeline playhead loop
   useEffect(() => {
     if (!isPlaying) return;
@@ -844,6 +790,90 @@ export const EditorPage: React.FC<EditorPageProps> = ({
       cameraBlocks: (activeScene.cameraBlocks || []).filter((cb) => cb.id !== id),
     });
   };
+
+  const keydownContextRef = useRef({
+    currentStep,
+    quickPreviewState,
+    currentTime,
+    duration,
+    cameraMode,
+    pauseQuickPreview,
+    resumeQuickPreview,
+    restartQuickPreview,
+    startQuickPreview,
+    handleAddCameraBlock,
+    handleUndo,
+    handleRedo,
+  });
+  keydownContextRef.current = {
+    currentStep,
+    quickPreviewState,
+    currentTime,
+    duration,
+    cameraMode,
+    pauseQuickPreview,
+    resumeQuickPreview,
+    restartQuickPreview,
+    startQuickPreview,
+    handleAddCameraBlock,
+    handleUndo,
+    handleRedo,
+  };
+
+  // Global Keyboard Shortcuts (Official Help Guide feature + 'N' for Camera)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      const ctx = keydownContextRef.current;
+
+      if (e.key === '1') setCurrentStep('route');
+      else if (e.key === '2') setCurrentStep('map');
+      else if (e.key === '3') setCurrentStep('signs');
+      else if (e.key === '4') setCurrentStep('overlays');
+      else if (e.key === '5') setCurrentStep('camera');
+      else if (e.key === '6') setCurrentStep('preview');
+      else if (e.key === ' ') {
+        e.preventDefault();
+        if (ctx.currentStep === 'route') {
+          if (ctx.quickPreviewState === 'playing') ctx.pauseQuickPreview();
+          else if (ctx.quickPreviewState === 'paused') ctx.resumeQuickPreview();
+          else if (ctx.quickPreviewState === 'finished') ctx.restartQuickPreview();
+          else ctx.startQuickPreview();
+        } else {
+          if (ctx.currentTime >= ctx.duration) {
+            setCurrentTime(0);
+            setIsPlaying(true);
+          } else {
+            setIsPlaying((p) => !p);
+          }
+        }
+      } else if (e.key === 'n' || e.key === 'N') {
+        e.preventDefault();
+        ctx.handleAddCameraBlock(ctx.cameraMode);
+      } else if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
+        e.preventDefault();
+        setHelpOpen((h) => {
+          if (!h) setHelpTab('shortcuts');
+          return !h;
+        });
+      } else if (e.key === 'Escape') {
+        setHelpOpen(false);
+        setMoreThemesOpen(false);
+      } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        ctx.handleUndo();
+      } else if (
+        ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'z') ||
+        ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y')
+      ) {
+        e.preventDefault();
+        ctx.handleRedo();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   // Synchronize local camera controls when active block changes
   useEffect(() => {
@@ -2080,6 +2110,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
             fitRouteRequested={fitRouteRequested}
             destinationPreview={destinationPreview}
             isQuickPreviewActive={quickPreviewState !== 'idle'}
+            isQuickPreviewPlaying={quickPreviewState === 'playing'}
             quickPreviewProgress={quickPreviewProgress}
             quickPreviewRemainingDistance={
               quickPreviewState !== 'idle'

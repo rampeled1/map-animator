@@ -45,7 +45,7 @@ interface CameraEditorPanelProps {
   onNext?: () => void;
 }
 
-export const CameraEditorPanel: React.FC<CameraEditorPanelProps> = ({
+export const CameraEditorPanel: React.FC<CameraEditorPanelProps> = React.memo(({
   cameraPreset = 'fly_along',
   onSetCameraPreset,
   aspectRatio = '16:9',
@@ -479,4 +479,4 @@ export const CameraEditorPanel: React.FC<CameraEditorPanelProps> = ({
       </div>
     </aside>
   );
-};
+});

@@ -9,7 +9,7 @@ interface OverlaysEditorPanelProps {
   onNext?: () => void;
 }
 
-export const OverlaysEditorPanel: React.FC<OverlaysEditorPanelProps> = ({
+export const OverlaysEditorPanel: React.FC<OverlaysEditorPanelProps> = React.memo(({
   overlays,
   mode = 'info',
   onUpdateOverlays,
@@ -247,4 +247,4 @@ export const OverlaysEditorPanel: React.FC<OverlaysEditorPanelProps> = ({
       )}
     </aside>
   );
-};
+});

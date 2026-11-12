@@ -40,7 +40,7 @@ function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
-export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
+export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = React.memo(({
   signs,
   routePoints,
   defaultCenter = [12.4964, 41.9028],
@@ -450,4 +450,4 @@ export const SignsEditorPanel: React.FC<SignsEditorPanelProps> = ({
       )}
     </aside>
   );
-};
+});

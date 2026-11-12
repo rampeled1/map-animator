@@ -1,4 +1,4 @@
-import { RoutePoint } from '../types';
+import type { RoutePoint } from '../types/index.ts';
 
 /**
  * Chaikin's algorithm for curve smoothing (Make it smooth in Route menu)

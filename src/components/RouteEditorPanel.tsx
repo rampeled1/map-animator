@@ -89,7 +89,7 @@ export const CANONICAL_TRANSPORTS = CANONICAL_META.map((meta) => ({
 
 const SIMPLE_TRANSPORTS = CANONICAL_TRANSPORTS;
 
-export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
+export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = React.memo(({
   routes,
   canonicalRoute,
   activeRouteId,
@@ -1324,4 +1324,4 @@ export const RouteEditorPanel: React.FC<RouteEditorPanelProps> = ({
       </div>
     </aside>
   );
-};
+});
