@@ -6,7 +6,12 @@ import { calculateTrackStats } from '../utils/gpxParser';
 import { ThreeMapLayer } from '../utils/threeMapLayer';
 import { ModelKind3D } from '../utils/vehicle3DManager';
 import { getSmoothSnakePath, type SnakePathSample } from '../utils/snakePathInterpolation';
-import { computeRouteBounds, shortestAngularDiff } from '../utils/cameraPresetMapper';
+import {
+  computeRouteBounds,
+  computeWholeTourFitPadding,
+  buildWholeTourFramingKey,
+  shortestAngularDiff,
+} from '../utils/cameraPresetMapper';
 import { WaypointOptionsModal } from './WaypointOptionsModal';
 
 function mapTransportTo3DModel(transport?: TransportType): ModelKind3D {
@@ -101,6 +106,8 @@ export interface MapViewerProps {
   onMoveInteraction?: () => void;
   onEndInteraction?: () => void;
   onCancelInteraction?: () => void;
+  isExport?: boolean;
+  onExportReady?: () => void;
 }
 
 interface SearchPlace {
@@ -479,11 +486,17 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
   onMoveInteraction,
   onEndInteraction,
   onCancelInteraction,
+  isExport = false,
+  onExportReady,
 }, ref) => {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const threeMapLayerRef = useRef<ThreeMapLayer | null>(null);
+  const onExportReadyRef = useRef(onExportReady);
+  onExportReadyRef.current = onExportReady;
+  const isExportRef = useRef(isExport);
+  isExportRef.current = isExport;
   const onMapCameraChangeRef = useRef(onMapCameraChange);
   onMapCameraChangeRef.current = onMapCameraChange;
   const routesRef = useRef(routes);
@@ -508,6 +521,53 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
   const overlaysRef = useRef(overlays);
   overlaysRef.current = overlays;
   const lastWholeTourKeyRef = useRef<string>('');
+  const wholeTourFramingRef = useRef<{
+    viewW: number;
+    viewH: number;
+    aspect: string;
+    frame: { x: number; y: number; width: number; height: number };
+  }>({
+    viewW: 0,
+    viewH: 0,
+    aspect: '16:9',
+    frame: { x: 0, y: 0, width: 0, height: 0 },
+  });
+
+  const applyWholeTourFraming = (
+    map: maplibregl.Map,
+    pts: Route['points'],
+    effectivePitch: number | undefined,
+    animate: boolean
+  ) => {
+    const { viewW, viewH, aspect: framingAspect, frame: framingRect } = wholeTourFramingRef.current;
+    if (viewW <= 0 || viewH <= 0 || framingRect.width <= 0 || framingRect.height <= 0) return;
+
+    const tourKey = buildWholeTourFramingKey(pts, framingAspect, framingRect);
+    if (!tourKey || lastWholeTourKeyRef.current === tourKey) return;
+
+    const bounds = computeRouteBounds(pts);
+    if (!bounds) return;
+
+    lastWholeTourKeyRef.current = tourKey;
+    const padding = computeWholeTourFitPadding(viewW, viewH, framingRect);
+    isProgrammaticCameraChangeRef.current = true;
+    try {
+      map.fitBounds(
+        [
+          [bounds.minLng, bounds.minLat],
+          [bounds.maxLng, bounds.maxLat],
+        ],
+        {
+          padding,
+          pitch: effectivePitch !== undefined ? effectivePitch : 10,
+          bearing: 0,
+          duration: animate ? 800 : 0,
+        }
+      );
+    } finally {
+      isProgrammaticCameraChangeRef.current = false;
+    }
+  };
   const followBearingRef = useRef<number | null>(null);
   const followCenterRef = useRef<[number, number] | null>(null);
   const lastFollowProgressRef = useRef<number>(0);
@@ -640,32 +700,7 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
         map.triggerRepaint();
 
         if (cameraPresetRef.current === 'whole_tour' && pts.length > 0) {
-          const tourKey = `${pts.length}-${pts[0]?.lat.toFixed(4)},${pts[0]?.lng.toFixed(
-            4
-          )}-${pts[pts.length - 1]?.lat.toFixed(4)},${pts[pts.length - 1]?.lng.toFixed(4)}`;
-          if (lastWholeTourKeyRef.current !== tourKey) {
-            lastWholeTourKeyRef.current = tourKey;
-            const bounds = computeRouteBounds(pts);
-            if (bounds) {
-              isProgrammaticCameraChangeRef.current = true;
-              try {
-                map.fitBounds(
-                  [
-                    [bounds.minLng, bounds.minLat],
-                    [bounds.maxLng, bounds.maxLat],
-                  ],
-                  {
-                    padding: { top: 60, bottom: 60, left: 60, right: 60 },
-                    pitch: effectivePitch !== undefined ? effectivePitch : 10,
-                    bearing: 0,
-                    duration: 800,
-                  }
-                );
-              } finally {
-                isProgrammaticCameraChangeRef.current = false;
-              }
-            }
-          }
+          applyWholeTourFraming(map, pts, effectivePitch, !isExportRef.current);
         } else if (activeBlock) {
           isProgrammaticCameraChangeRef.current = true;
           try {
@@ -985,11 +1020,15 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
       zoom: 3.5,
       bearing: 0,
       pitch: 0,
-      attributionControl: { compact: true },
+      interactive: !isExportRef.current,
+      pixelRatio: isExportRef.current ? 1 : undefined,
+      attributionControl: isExportRef.current && !includeMapCredit ? false : { compact: true },
       canvasContextAttributes: { preserveDrawingBuffer: true },
     });
 
-    map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'bottom-right');
+    if (!isExportRef.current) {
+      map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'bottom-right');
+    }
 
     let rafId = 0;
     const triggerSync = () => {
@@ -1048,6 +1087,22 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
 
     map.on('style.load', ensureThreeLayer);
 
+    let exportReadyNotified = false;
+    let exportReadyFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+    if (isExportRef.current) {
+      const notifyExportReady = () => {
+        if (exportReadyNotified) return;
+        exportReadyNotified = true;
+        if (exportReadyFallbackTimer) {
+          clearTimeout(exportReadyFallbackTimer);
+          exportReadyFallbackTimer = null;
+        }
+        onExportReadyRef.current?.();
+      };
+      map.once('idle', notifyExportReady);
+      exportReadyFallbackTimer = setTimeout(notifyExportReady, 2500);
+    }
+
     const handleCameraUserChange = (
       e: maplibregl.MapLibreEvent<any>,
       changeType: 'zoom' | 'pitch' | 'rotate'
@@ -1078,6 +1133,10 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
 
     return () => {
       cancelAnimationFrame(rafId);
+      if (exportReadyFallbackTimer) {
+        clearTimeout(exportReadyFallbackTimer);
+        exportReadyFallbackTimer = null;
+      }
       if (threeMapLayerRef.current) {
         try {
           if (map.getLayer(threeMapLayerRef.current.id)) {
@@ -1250,30 +1309,7 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
       followCenterRef.current = null;
       mapRef.current?.triggerRepaint();
       if (cameraPreset === 'whole_tour' && pts.length > 0) {
-        const tourKey = `${pts.length}-${pts[0]?.lat.toFixed(4)},${pts[0]?.lng.toFixed(4)}-${pts[pts.length - 1]?.lat.toFixed(4)},${pts[pts.length - 1]?.lng.toFixed(4)}`;
-        if (lastWholeTourKeyRef.current !== tourKey) {
-          lastWholeTourKeyRef.current = tourKey;
-          const bounds = computeRouteBounds(pts);
-          if (bounds) {
-            isProgrammaticCameraChangeRef.current = true;
-            try {
-              map.fitBounds(
-                [
-                  [bounds.minLng, bounds.minLat],
-                  [bounds.maxLng, bounds.maxLat],
-                ],
-                {
-                  padding: { top: 60, bottom: 60, left: 60, right: 60 },
-                  pitch: effectivePitch !== undefined ? effectivePitch : 10,
-                  bearing: 0,
-                  duration: 800,
-                }
-              );
-            } finally {
-              isProgrammaticCameraChangeRef.current = false;
-            }
-          }
-        }
+        applyWholeTourFraming(map, pts, effectivePitch, !isExport);
         return;
       }
 
@@ -1450,6 +1486,10 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
     rotateOffset,
     currentStep,
     cameraPreset,
+    aspect,
+    aspectRatio,
+    viewSize.w,
+    viewSize.h,
   ]);
 
   // Trigger map resize when aspect ratio changes
@@ -1514,9 +1554,18 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
     };
   }, [searchQuery, searchOpen]);
 
-  const [resW, resH] = getAspectRatioDims(aspect, size);
-  const frame = computeFrameRect(viewSize.w, viewSize.h, resW, resH);
+  const effectiveAspect = aspectRatio || aspect || '16:9';
+  const [resW, resH] = getAspectRatioDims(effectiveAspect, size);
+  const frame = isExport
+    ? { x: 0, y: 0, width: viewSize.w || resW, height: viewSize.h || resH }
+    : computeFrameRect(viewSize.w, viewSize.h, resW, resH);
   const scale = Math.min(frame.width, frame.height) / 1080 || 1;
+  wholeTourFramingRef.current = {
+    viewW: isExport ? viewSize.w || resW : viewSize.w,
+    viewH: isExport ? viewSize.h || resH : viewSize.h,
+    aspect: effectiveAspect,
+    frame,
+  };
 
   const handleSelectPlace = (place: SearchPlace) => {
     setSearchOpen(false);
@@ -1868,9 +1917,11 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
       <div ref={mapContainerRef} className="map" translate="no" />
 
       {/* 16:9 · 1920×1080 resolution pill at top center (matching all 4 snapshots) */}
-      <div className="absolute top-2.5 left-1/2 -translate-x-1/2 bg-[#16191ecc] text-[#8f96a0] text-[11px] font-mono font-medium px-3 py-1 rounded-full border border-[var(--border)] shadow-md pointer-events-none z-10 backdrop-blur-sm select-none">
-        {aspect} · {resW}×{resH}
-      </div>
+      {!isExport && (
+        <div className="absolute top-2.5 left-1/2 -translate-x-1/2 bg-[#16191ecc] text-[#8f96a0] text-[11px] font-mono font-medium px-3 py-1 rounded-full border border-[var(--border)] shadow-md pointer-events-none z-10 backdrop-blur-sm select-none">
+          {effectiveAspect} · {resW}×{resH}
+        </div>
+      )}
 
       {/* Route SVG Overlay */}
       {viewSize.w > 0 && map && (
@@ -2209,23 +2260,27 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
       {/* Video Frame Overlay, HUD Dashboard, & Anchor Points */}
       {viewSize.w > 0 && (
         <svg className="overlay" width={viewSize.w} height={viewSize.h} aria-hidden="true">
-          <path
-            className="dim"
-            fillRule="evenodd"
-            d={`M0 0H${viewSize.w}V${viewSize.h}H0Z M${frame.x} ${frame.y}V${
-              frame.y + frame.height
-            }H${frame.x + frame.width}V${frame.y}Z`}
-          />
-          <rect
-            x={frame.x}
-            y={frame.y}
-            width={frame.width}
-            height={frame.height}
-            className="frame-outline"
-          />
-          <text className="frame-label" x={frame.x} y={frame.y - 8}>
-            {aspect} · {resW}×{resH}
-          </text>
+          {!isExport && (
+            <>
+              <path
+                className="dim"
+                fillRule="evenodd"
+                d={`M0 0H${viewSize.w}V${viewSize.h}H0Z M${frame.x} ${frame.y}V${
+                  frame.y + frame.height
+                }H${frame.x + frame.width}V${frame.y}Z`}
+              />
+              <rect
+                x={frame.x}
+                y={frame.y}
+                width={frame.width}
+                height={frame.height}
+                className="frame-outline"
+              />
+              <text className="frame-label" x={frame.x} y={frame.y - 8}>
+                {effectiveAspect} · {resW}×{resH}
+              </text>
+            </>
+          )}
 
           {/* Overlays HUD: Trip Title & Subtitle (Draggable Map Object) */}
           {overlays?.title && (
@@ -2655,7 +2710,7 @@ export const MapViewer = forwardRef<MapViewerHandle, MapViewerProps>(({
       )}
 
       {/* Photon Place Search (`Q3` exact structure) */}
-      {viewSize.w > 0 && (
+      {!isExport && viewSize.w > 0 && (
         <div
           ref={searchBoxRef}
           className={`place-search float${searchOpen ? ' open' : ''}`}

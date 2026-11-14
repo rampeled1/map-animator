@@ -40,7 +40,11 @@ import { Play, Pause, HelpCircle, Download, PanelLeftClose, PanelLeftOpen, Rotat
 import { SnapProfile, getRoadRoute } from '../utils/roadRouter';
 import { calculateTrackStats } from '../utils/gpxParser';
 import { exportProjectFile } from '../utils/projectStorage';
-import { startCanvasRecording } from '../utils/videoRecorder';
+import {
+  startCanvasRecording,
+  getExportDimensions,
+  resolveExportSceneAtTime,
+} from '../utils/videoRecorder';
 import { mapPresetToCameraBlocks, shortestAngularDiff } from '../utils/cameraPresetMapper';
 import { getSmoothSnakePath } from '../utils/snakePathInterpolation';
 import {
@@ -277,11 +281,26 @@ export const EditorPage: React.FC<EditorPageProps> = ({
   const [heightKm, setHeightKm] = useState<number>(2.9);
   const [orbitDirection, setOrbitDirection] = useState<'clockwise' | 'anticlockwise'>('clockwise');
 
-  // In-browser video rendering state
+  // In-browser video rendering state (isolated from editor playback & camera)
   const [isRendering, setIsRendering] = useState(false);
   const [renderProgress, setRenderProgress] = useState(0);
   const [renderStatus, setRenderStatus] = useState('');
   const [renderAllScenes, setRenderAllScenes] = useState(false);
+  const [exportSceneIndex, setExportSceneIndex] = useState(0);
+  const [exportSceneTime, setExportSceneTime] = useState(0);
+  const [exportConfig, setExportConfig] = useState<{
+    aspectRatio: AspectRatioOption;
+    renderAllScenes: boolean;
+    initialSceneIndex: number;
+    durationSec: number;
+    fps: number;
+  } | null>(null);
+  const exportStageRef = useRef<HTMLDivElement>(null);
+  const exportMapViewerRef = useRef<MapViewerHandle | null>(null);
+  const exportRecorderRef = useRef<{ stop: () => void } | null>(null);
+  const exportSessionIdRef = useRef<number>(0);
+  const exportSceneIdxRef = useRef<number>(0);
+  const lastExportUIUpdateRef = useRef<number>(0);
   const [creditCopied, setCreditCopied] = useState(false);
   const [fitRouteRequested, setFitRouteRequested] = useState<Route | null>(null);
   const [destinationPreview, setDestinationPreview] = useState<DestinationPreview | null>(null);
@@ -544,18 +563,12 @@ export const EditorPage: React.FC<EditorPageProps> = ({
     let frameId: number;
 
     const loop = (now: number) => {
-      const deltaSec = ((now - lastTime) / 1000) * (isRendering ? 1 : playbackSpeed);
+      const deltaSec = ((now - lastTime) / 1000) * playbackSpeed;
       lastTime = now;
 
       const nextTime = currentTimeRef.current + deltaSec;
 
       if (nextTime >= duration) {
-        if (isRendering && renderAllScenes && activeSceneIndex < project.scenes.length - 1) {
-          currentTimeRef.current = 0;
-          setCurrentTime(0);
-          setActiveSceneIndex((idx) => idx + 1);
-          return;
-        }
         currentTimeRef.current = duration;
         setCurrentTime(duration);
         setIsPlaying(false);
@@ -604,7 +617,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({
       isQuickPreview: false,
     });
     return () => cancelAnimationFrame(frameId);
-  }, [isPlaying, duration, playbackSpeed, isRendering, renderAllScenes, activeSceneIndex, project.scenes.length]);
+  }, [isPlaying, duration, playbackSpeed]);
 
   const uiMode = project.uiMode || 'simple';
   const activeRoute = projectRoutes[0];
@@ -1138,43 +1151,122 @@ export const EditorPage: React.FC<EditorPageProps> = ({
     }
   };
 
-  // Video render handler
-  const handleStartRender = () => {
-    if (!stageRef.current) return;
-    setIsRendering(true);
-    setRenderProgress(0);
-    setRenderStatus('Initializing recording...');
-    if (renderAllScenes && project.scenes.length > 1) {
-      setActiveSceneIndex(0);
-    }
-    setCurrentTime(0);
-    setIsPlaying(true);
+  // Video render handlers (independent export clock & offscreen MapViewer; never mutates editor playback or camera)
+  const cleanupExportSession = () => {
+    exportRecorderRef.current = null;
+    setIsRendering(false);
+    setExportConfig(null);
+  };
 
-    const totalDurationSec =
-      renderAllScenes && project.scenes.length > 1
-        ? project.scenes.reduce((acc, s) => acc + (s.duration || 15), 0)
-        : duration;
+  const handleStartRender = () => {
+    if (isRendering) return;
+    if (projectRoutes.every((r) => r.points.length === 0)) return;
+
+    const multiScene = renderAllScenes && project.scenes.length > 1;
+    const initialSceneIdx = multiScene ? 0 : activeSceneIndex;
+    const totalDurationSec = multiScene
+      ? project.scenes.reduce((acc, s) => acc + (s.duration || 15), 0)
+      : duration;
+
+    exportSessionIdRef.current += 1;
+    exportSceneIdxRef.current = initialSceneIdx;
+    lastExportUIUpdateRef.current = 0;
+    setExportSceneIndex(initialSceneIdx);
+    setExportSceneTime(0);
+    setRenderProgress(0);
+    setRenderStatus('Preparing export renderer...');
+    setExportConfig({
+      aspectRatio,
+      renderAllScenes: multiScene,
+      initialSceneIndex: initialSceneIdx,
+      durationSec: totalDurationSec,
+      fps: project.fps || 30,
+    });
+    setIsRendering(true);
+  };
+
+  const handleExportMapReady = () => {
+    const sessionId = exportSessionIdRef.current;
+    if (!exportConfig || !exportStageRef.current || exportRecorderRef.current) return;
+
+    const scenesSnapshot = project.scenes;
+    const cfg = exportConfig;
 
     try {
-      startCanvasRecording(stageRef.current, project.name, {
-        durationSec: totalDurationSec,
-        fps: project.fps || 30,
+      exportRecorderRef.current = startCanvasRecording(exportStageRef.current, project.name, {
+        durationSec: cfg.durationSec,
+        fps: cfg.fps,
+        aspectRatio: cfg.aspectRatio,
+        onFrame: (elapsedSec, dtSec, rafTime) => {
+          if (exportSessionIdRef.current !== sessionId) return;
+          const resolved = resolveExportSceneAtTime(
+            scenesSnapshot,
+            elapsedSec,
+            cfg.renderAllScenes,
+            cfg.initialSceneIndex
+          );
+          if (resolved.sceneIndex !== exportSceneIdxRef.current) {
+            exportSceneIdxRef.current = resolved.sceneIndex;
+            setExportSceneIndex(resolved.sceneIndex);
+            setExportSceneTime(resolved.localTime);
+            lastExportUIUpdateRef.current = rafTime;
+          } else if (rafTime - lastExportUIUpdateRef.current >= 33) {
+            lastExportUIUpdateRef.current = rafTime;
+            setExportSceneTime(resolved.localTime);
+          }
+
+          exportMapViewerRef.current?.updatePlaybackFrame({
+            progress: resolved.localProgress,
+            currentTime: resolved.localTime,
+            dtSec,
+            rafTime,
+            isPlaying: true,
+            isQuickPreview: false,
+            isSeek: elapsedSec === 0,
+          });
+        },
         onProgress: (p, status) => {
+          if (exportSessionIdRef.current !== sessionId) return;
           setRenderProgress(p);
           setRenderStatus(status);
         },
         onFinish: () => {
-          setIsRendering(false);
-          setIsPlaying(false);
-          setCurrentTime(0);
+          if (exportSessionIdRef.current !== sessionId) return;
+          cleanupExportSession();
+        },
+        onCancel: () => {
+          if (exportSessionIdRef.current !== sessionId) return;
+          cleanupExportSession();
+        },
+        onError: (err) => {
+          if (exportSessionIdRef.current !== sessionId) return;
+          alert(`Could not complete render: ${err.message}`);
+          cleanupExportSession();
         },
       });
     } catch (err: any) {
       alert(`Could not start render: ${err.message}`);
-      setIsRendering(false);
-      setIsPlaying(false);
+      cleanupExportSession();
     }
   };
+
+  const handleCancelRender = () => {
+    exportSessionIdRef.current += 1;
+    if (exportRecorderRef.current) {
+      const rec = exportRecorderRef.current;
+      exportRecorderRef.current = null;
+      rec.stop();
+    }
+    cleanupExportSession();
+  };
+
+  useEffect(() => {
+    return () => {
+      exportSessionIdRef.current += 1;
+      exportRecorderRef.current?.stop();
+      exportRecorderRef.current = null;
+    };
+  }, []);
 
   const activeStepPanel = (
     <>
@@ -2269,6 +2361,63 @@ export const EditorPage: React.FC<EditorPageProps> = ({
         </main>
       </div>
 
+      {/* Offscreen Independent Export Renderer (never touches editor camera or playback state) */}
+      {isRendering && exportConfig && (() => {
+        const expScene = project.scenes[exportSceneIndex] || project.scenes[0];
+        const expDims = getExportDimensions(exportConfig.aspectRatio);
+        return (
+          <div
+            ref={exportStageRef}
+            data-testid="export-stage"
+            aria-hidden="true"
+            style={{
+              position: 'fixed',
+              left: '-10000px',
+              top: 0,
+              width: `${expDims.width}px`,
+              height: `${expDims.height}px`,
+              pointerEvents: 'none',
+              overflow: 'hidden',
+            }}
+          >
+            <MapViewer
+              ref={exportMapViewerRef}
+              isExport
+              onExportReady={handleExportMapReady}
+              themeId={expScene.mapThemeId}
+              mapLabels={expScene.mapLabels ?? true}
+              labelLang={expScene.labelLang || undefined}
+              regions={expScene.regions ?? false}
+              terrain={expScene.terrain ?? false}
+              aspect={exportConfig.aspectRatio}
+              aspectRatio={exportConfig.aspectRatio}
+              size={project.size}
+              routes={projectRoutes}
+              signs={expScene.signs}
+              totalRouteDistanceKm={totalPreviewDistanceKm}
+              currentStep="preview"
+              currentTime={exportSceneTime}
+              duration={expScene.duration || 15}
+              overlays={expScene.overlays}
+              cameraMode={cameraMode}
+              cameraPreset={cameraPreset}
+              followOrient={followOrient}
+              rotateOffset={rotateOffset}
+              followZoom={followZoom}
+              tilt={tilt}
+              lookAhead={lookAhead}
+              distanceKm={distanceKm}
+              heightKm={heightKm}
+              orbitDirection={orbitDirection}
+              cameraBlocks={expScene.cameraBlocks}
+              includeMapCredit={project.includeMapCredit ?? true}
+              isPlaying={true}
+              canonicalRoute={canonicalRoute}
+            />
+          </div>
+        );
+      })()}
+
       {/* Render Progress Scrim Dialog */}
       {isRendering &&
         createPortal(
@@ -2282,9 +2431,18 @@ export const EditorPage: React.FC<EditorPageProps> = ({
                   style={{ width: `${renderProgress}%` }}
                 />
               </div>
-              <span className="text-xs font-mono font-bold text-[var(--accent)]">
-                {renderProgress}%
-              </span>
+              <div className="flex items-center justify-between pt-1">
+                <span className="text-xs font-mono font-bold text-[var(--accent)]">
+                  {renderProgress}%
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCancelRender}
+                  className="ghost text-xs px-3 py-1.5"
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           </div>,
           document.body

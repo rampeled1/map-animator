@@ -12,6 +12,48 @@ export interface RouteBounds {
   maxLat: number;
 }
 
+export interface FrameRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Computes MapLibre fitBounds padding so that the route fits inside `frame`
+ * within a `viewW x viewH` canvas with a consistent proportional margin (48/1080).
+ * Shared by both Whole Tour Preview and Create Video export so compositions match.
+ */
+export function computeWholeTourFitPadding(
+  viewW: number,
+  viewH: number,
+  frame: FrameRect
+): { top: number; bottom: number; left: number; right: number } {
+  const minDim = Math.max(1, Math.min(frame.width, frame.height));
+  const margin = Math.max(12, Math.round(minDim * (48 / 1080)));
+  return {
+    top: Math.max(0, Math.round(frame.y + margin)),
+    bottom: Math.max(0, Math.round(viewH - (frame.y + frame.height) + margin)),
+    left: Math.max(0, Math.round(frame.x + margin)),
+    right: Math.max(0, Math.round(viewW - (frame.x + frame.width) + margin)),
+  };
+}
+
+/**
+ * Builds a cache key for Whole Tour fitBounds that invalidates whenever the
+ * route endpoints, aspect ratio, or frame dimensions change.
+ */
+export function buildWholeTourFramingKey(
+  points: RoutePoint[],
+  aspect: string,
+  frame: FrameRect
+): string {
+  if (!points || points.length === 0) return '';
+  const first = points[0];
+  const last = points[points.length - 1];
+  return `${points.length}-${first.lat.toFixed(4)},${first.lng.toFixed(4)}-${last.lat.toFixed(4)},${last.lng.toFixed(4)}-${aspect}-${Math.round(frame.width)}x${Math.round(frame.height)}`;
+}
+
 /**
  * Computes shortest signed angular difference along circular arc [-180, +180].
  */
